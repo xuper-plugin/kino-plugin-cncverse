@@ -1,5 +1,10 @@
 # CNCVerse — plugin de Kino
 
+> **Archivado.** Para ver películas y series usa [Latino](https://github.com/xuper-plugin/kino-plugin-latino) (2.1.0 en
+> adelante): trae CNCVerse como fuente de respaldo de reproducción, sin la búsqueda ni las listas del puente, que eran
+> lentas y poco fiables. Este plugin ya no recibe cambios.
+
+
 Películas, series, anime, eventos deportivos y TV en vivo a partir de **CNCVerse Bridge**
 ([cncverse.dpdns.org](https://cncverse.dpdns.org)), el puente que expone proveedores de CloudStream como addon de
 Stremio. Es un plugin nativo de Kino: habla directo con el puente, sin pasar por la conversión de addons de Stremio.
