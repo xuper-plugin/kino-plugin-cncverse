@@ -32,7 +32,15 @@ const SOURCES = [
   { key: "dizilla", catalog: "cnc_Dizilla_other", title: "Dizilla", kind: "series" },
   { key: "reanime", catalog: "cnc_ReANIME_ReAnime_other", title: "Re:ANIME", kind: "series" },
 ];
+// The bridge's match replays ("Highlights") are on-demand videos listed under its tv type; they have their own tab and tiles.
+const HIGHLIGHTS = [
+  { key: "hllivxow", catalog: "cnc_LivXowHighlights_tv", type: "tv", title: "LivXow", kind: "movie" },
+  { key: "hlplayfy", catalog: "cnc_PlayFyHighlights_tv", type: "tv", title: "PlayFy", kind: "movie" },
+  { key: "hlsportzx", catalog: "cnc_SportzXHighlights_tv", type: "tv", title: "SportzX", kind: "movie" },
+];
 const HOME_SOURCES = ["hdhub4u", "4khdhub", "kisskh", "reanime", "movix"];
+const SECTION_MOVIES = ["hdhub4u", "4khdhub", "vega", "rog", "multi", "cinefreak", "moviebox", "movix"];
+const SECTION_SERIES = ["kisskh", "dizilla", "reanime"];
 
 // Live: the sports-event catalogs and JioTV, split by its own genres. `vocab` is Kino's closed genre vocabulary.
 const EVENTS = [
@@ -60,6 +68,8 @@ const TEXTS = {
     noEpisodes: "Este título no trae lista de episodios.",
     noSignal: "Este canal no tiene señal ahora mismo. Si el evento aún no empieza, vuelve más tarde.",
     shelfAll: "Lo último", copy: "Opción {n}", episode: "Episodio {n}",
+    tabStart: "Inicio", tabMovies: "Películas", tabSeries: "Series y anime", tabHighlights: "Resúmenes",
+    sectionHero: "Lo último que llegó.", tileHighlights: "Resúmenes · {name}",
     tileEvents: "Eventos · {name}", tileJio: "JioTV · {name}", tileLive: "En vivo",
     cacheStatus: "Caché: {n} entradas, {kb} KB", cacheCleared: "Listo: se vació la caché",
     healthOk: "responde", healthFail: "falla", healthNone: "sin datos",
@@ -76,6 +86,8 @@ const TEXTS = {
     noEpisodes: "This title has no episode list.",
     noSignal: "This channel has no signal right now. If the event has not started yet, come back later.",
     shelfAll: "Latest", copy: "Option {n}", episode: "Episode {n}",
+    tabStart: "Start", tabMovies: "Movies", tabSeries: "Series & anime", tabHighlights: "Highlights",
+    sectionHero: "Fresh arrivals.", tileHighlights: "Highlights · {name}",
     tileEvents: "Events · {name}", tileJio: "JioTV · {name}", tileLive: "Live",
     cacheStatus: "Cache: {n} entries, {kb} KB", cacheCleared: "Done: the cache is empty",
     healthOk: "responding", healthFail: "failing", healthNone: "no data",
@@ -370,7 +382,7 @@ function itemsOf(body, source, shelfKind) {
 }
 
 function sourceOf(key) {
-  return SOURCES.find((s) => s.key === key);
+  return SOURCES.concat(HIGHLIGHTS).find((s) => s.key === key);
 }
 
 // A shelf: a source's catalog, optionally one genre, from `skip`.
@@ -378,7 +390,7 @@ async function shelfItems(source, genreIndex, skip, slice) {
   let genre = "";
   if (genreIndex > 0) genre = (await genresOf(source.catalog))[genreIndex - 1] || "";
   const extra = [genre ? "genre=" + enc(genre) : "", skip > 0 ? "skip=" + skip : ""].filter(Boolean).join("&");
-  const body = await getJson(`/catalog/other/${source.catalog}${extra ? "/" + extra : ""}.json`, LIST_TIMEOUT_MS, slice);
+  const body = await getJson(`/catalog/${source.type || "other"}/${source.catalog}${extra ? "/" + extra : ""}.json`, LIST_TIMEOUT_MS, slice);
   return { items: itemsOf(body, source, shelfKindOf(genre)), genre };
 }
 
@@ -390,10 +402,18 @@ export async function search(query) {
   const q = kino.rank.shortQuery(String(query.q || "").trim());
   if (!q) return [];
   base();
+  // Inside a "Ver más" page (capability scopedSearch): only that source. Any other page: null, Kino filters it itself.
+  let sources = SOURCES;
+  if (query.within) {
+    const w = /^c:([a-z0-9]+):\d{1,3}$/.exec(String(query.within));
+    const only = w && sourceOf(w[1]);
+    if (!only) return null;
+    sources = [only];
+  }
   const titles = [query.q, query.originalTitle].concat(Array.isArray(query.altTitles) ? query.altTitles : []).filter((x) => typeof x === "string" && x.trim());
-  const lists = await mapLimit(SOURCES, 3, async (s) => {
+  const lists = await mapLimit(sources, 3, async (s) => {
     try {
-      const body = await getJson(`/catalog/other/${s.catalog}/search=${enc(q)}.json`, 12000, true);
+      const body = await getJson(`/catalog/${s.type || "other"}/${s.catalog}/search=${enc(q)}.json`, 12000, true);
       return itemsOf(body, s, null);
     } catch (e) {
       if (e && (e.code === "auth_required" || e.code === "invalid_request")) throw e;
@@ -416,12 +436,17 @@ export async function search(query) {
 
 // ---- 6. home, browse, categories ------------------------------------------------------------------------------
 
+function genreOfSource(source) {
+  if (source.catalog.includes("Highlights")) return "deportes";
+  return source.kind === "series" ? "series" : "peliculas";
+}
+
 async function homeRow(key) {
   const source = sourceOf(key);
   if (!source) return null;
   try {
     const items = await cached("row:" + key, FRESH_LIST_MS, async () => (await shelfItems(source, 0, 0, true)).items.slice(0, ROW_MAX));
-    return items.length ? { id: "src-" + key, title: source.title, ref: `c:${key}:0`, items, genre: source.kind === "series" ? "series" : "peliculas" } : null;
+    return items.length ? { id: "src-" + key, title: source.title, ref: `c:${key}:0`, items, genre: genreOfSource(source) } : null;
   } catch (e) {
     if (e && (e.code === "auth_required" || e.code === "invalid_request")) throw e;
     kino.log("row " + key + " failed: " + (e && e.message));
@@ -449,7 +474,9 @@ export async function browse(ref, cursor) {
 
 // Categorías: one tile per source (at most 24); the art is the first title's poster.
 export async function categories() {
-  const tiles = SOURCES.map((s) => ({ id: s.key, title: s.title, ref: `c:${s.key}:0`, source: s }));
+  const tiles = SOURCES.map((s) => ({ id: s.key, title: s.title, ref: `c:${s.key}:0`, source: s })).concat(
+    HIGHLIGHTS.map((s) => ({ id: s.key, title: t("tileHighlights", { name: s.title }), ref: `c:${s.key}:0`, source: s })),
+  );
   return (await mapLimit(tiles, 4, async (tile) => {
     let art = "";
     try {
@@ -465,6 +492,29 @@ export async function categories() {
     if (art) out.art = art;
     return out;
   }));
+}
+
+// The plugin's own section (a chip on the phone's Inicio, an entry in the TV's sidebar): the latest, movies, series and
+// the sports replays, one row per source.
+export async function section({ tab }) {
+  const tabs = [
+    { id: "start", label: t("tabStart") },
+    { id: "movies", label: t("tabMovies") },
+    { id: "series", label: t("tabSeries") },
+    { id: "highlights", label: t("tabHighlights") },
+  ];
+  const chosen = tabs.some((x) => x.id === tab) ? tab : tabs[0].id;
+  const keys = { start: HOME_SOURCES, movies: SECTION_MOVIES, series: SECTION_SERIES, highlights: HIGHLIGHTS.map((h) => h.key) }[chosen];
+  base();
+  const rows = (await mapLimit(keys, 3, homeRow)).filter(Boolean);
+  const answer = { tabs, tab: chosen, rows };
+  const pool = rows.length ? rows[0].items.filter((x) => x.poster) : [];
+  if (pool.length) {
+    // Today's pick: the same all day, a different one tomorrow.
+    const pick = pool[Math.floor(Date.now() / 86400000) % pool.length];
+    answer.hero = { title: pick.title, text: t("sectionHero"), image: pick.poster };
+  }
+  return answer;
 }
 
 // ---- 7. episodes and details ----------------------------------------------------------------------------------
@@ -585,7 +635,7 @@ function describe(s) {
   // "Source: HDhub4u • HubDrive HubCloud [FSL Server]" -> the bracketed server name when there is one
   const src = lineOf(title, "🛰️").replace(/^Source:\s*/i, "");
   const br = /\[([^\]]{2,24})\]/.exec(src);
-  const server = br ? br[1] : src.split("•").pop().trim().slice(0, 24);
+  const server = (br ? br[1] : src.split("•").pop()).replace(/^[^\p{L}\p{N}]+/u, "").trim().slice(0, 24);
   return { quality, gb, server };
 }
 
@@ -743,7 +793,7 @@ export async function liveCategories() {
     if (e && (e.code === "auth_required" || e.code === "invalid_request")) throw e;
     kino.log("jio genres failed: " + (e && e.message));
   }
-  genres.forEach((g, i) => out.push({ id: "jio-" + (i + 1), title: t("tileJio", { name: genreLabel(g) }), genre: JIO_VOCAB[g] || "entretenimiento" }));
+  genres.forEach((g, i) => out.push({ id: "jio-" + (i + 1), title: t("tileJio", { name: genreLabel(g) }), genre: JIO_VOCAB[g] || "entretenimiento", country: "IN" }));
   return out;
 }
 

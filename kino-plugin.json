@@ -1,10 +1,10 @@
 {
   "id": "cncverse",
   "name": "CNCVerse",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "apiVersion": 9,
   "entry": "plugin.js",
-  "description": "Películas, series, anime, eventos deportivos y TV en vivo desde CNCVerse Bridge. Funciona al instalarlo, sin configurar nada.",
+  "description": "Películas, series, anime, resúmenes y TV deportiva en vivo desde CNCVerse Bridge. Funciona al instalarlo, sin configurar nada.",
   "author": "xuper-plugin",
   "homepage": "https://github.com/xuper-plugin/kino-plugin-cncverse",
   "hosts": [
@@ -17,7 +17,8 @@
     "episodes",
     "resolve",
     "download",
-    "channels"
+    "channels",
+    "scopedSearch"
   ],
   "streamHosts": "any",
   "liveStreamHosts": "any",
@@ -25,7 +26,7 @@
     "movies",
     "series"
   ],
-  "color": "#7C5CFF",
+  "color": "#6F4FF5",
   "telemetry": true,
   "settings": [
     {
@@ -153,5 +154,16 @@
   ],
   "secrets": {
     "bridgeCode": "kino-sealed:v1:0mkle0flc-78CKwJzPS3h6oSbctKL_0Eht0lFEFpDXn-v8cC6-4vp_57IkkDx9V9WS1EHY85Oc390I33JkDI6-p_P2egUhhwaUk"
+  },
+  "section": {
+    "label": "CNCVerse",
+    "labelEn": "CNCVerse"
+  },
+  "theme": {
+    "accent": "#6F4FF5",
+    "onAccent": "#FFFFFF",
+    "background": "#07050D",
+    "surface": "#15111F",
+    "highlight": "#C9BBFF"
   }
 }

@@ -18,7 +18,11 @@ Si prefieres usar tu propio perfil de CNCVerse Bridge, pega la URL de tu `manife
 - **Películas, series y anime** de HDHub4U, 4K HDHUB, VegaMovies, Rogmovies, MultiMovies, Cinefreak, MovieBox IN, Movix,
   Kisskh, Dizilla y Re:ANIME: filas en el Inicio, una categoría por fuente, géneros de cada una, búsqueda en todas a la
   vez, episodios y ficha del título.
-- **En vivo**: eventos deportivos (LivXow, PlayZTV, PlayFy, SportzX, SKTech) y JioTV por género.
+- **Sección propia «CNCVerse»** con pestañas Inicio, Películas, Series y anime y Resúmenes, y una portada del día; tema
+  de color propio.
+- **En vivo**: eventos deportivos (LivXow, PlayZTV, PlayFy, SportzX, SKTech) y JioTV por género (país IN).
+- **Resúmenes deportivos** (LivXow, PlayFy, SportzX): partidos ya jugados, para ver bajo demanda.
+- **Búsqueda dentro de una página** («Ver más») acotada a esa fuente.
 - Elige la copia por calidad y tamaño máximo (ordenan, no ocultan); el resto queda en el menú de servidores. Si abres un
   título otra vez poco después porque no cargó, sirve otra copia.
 
