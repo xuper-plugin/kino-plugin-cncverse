@@ -1,7 +1,7 @@
 {
   "id": "cncverse",
   "name": "CNCVerse",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "apiVersion": 9,
   "entry": "plugin.js",
   "description": "Películas, series, anime, resúmenes y TV deportiva en vivo desde CNCVerse Bridge. Funciona al instalarlo, sin configurar nada.",

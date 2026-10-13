@@ -13,7 +13,9 @@ const ROW_MAX = 60;
 const LIST_TIMEOUT_MS = 12000;
 const SEARCH_SOURCE_TIMEOUT_MS = 8000;
 const SEARCH_START_DEADLINE_MS = 5000;
-const SLOW_TIMEOUT_MS = 30000; // a title's page or streams make the bridge scrape a site: 10-18 s is normal
+// A title's page or streams make the bridge scrape a site: 10-18 s is normal, a long anime's first episode list can pass 60 s.
+// Kino ends episodes/details/resolve at 20 s, so a call waits 17 s: the bridge keeps what it scraped, and asking again answers.
+const SLOW_TIMEOUT_MS = 17000;
 const PAGE_MAX = 100;
 const MAX_SKIP = 1000;
 
@@ -70,6 +72,8 @@ const TEXTS = {
     needAddress: "No se pudo abrir el código sellado del plugin: instálalo desde su rama principal, sin @rama, o pega tu propia dirección en los ajustes.",
     badAddress: "La dirección no es válida: debe ser la de cncverse.dpdns.org con tu código personal.",
     unavailable: "CNCVerse no responde ahora. Intenta de nuevo en un rato.",
+    warming: "El puente está preparando esta lista (los títulos largos tardan la primera vez). Vuelve a abrirlo en un momento.",
+    warmingVideo: "El puente está buscando el video (puede tardar la primera vez). Vuelve a intentarlo en un momento.",
     noStreams: "Este título no tiene video disponible por ahora. Prueba otro o vuelve más tarde.",
     noEpisodes: "Este título no trae lista de episodios.",
     noSignal: "Este canal no tiene señal ahora mismo. Si el evento aún no empieza, vuelve más tarde.",
@@ -88,6 +92,8 @@ const TEXTS = {
     needAddress: "The plugin's sealed code could not be opened: install it from its default branch, without a @branch, or paste your own address in the settings.",
     badAddress: "The address is not valid: it must be the cncverse.dpdns.org one with your personal code.",
     unavailable: "CNCVerse isn't responding right now. Try again in a while.",
+    warming: "The bridge is preparing this list (long titles take longer the first time). Open it again in a moment.",
+    warmingVideo: "The bridge is looking for the video (it can take a while the first time). Try again in a moment.",
     noStreams: "This title has no video available right now. Try another or come back later.",
     noEpisodes: "This title has no episode list.",
     noSignal: "This channel has no signal right now. If the event has not started yet, come back later.",
@@ -298,6 +304,20 @@ async function getJson(path, timeoutMs, slice) {
   } catch {
     note(false);
     throw kino.error("unavailable", "CNCVerse answered something that is not JSON", { userMessage: t("unavailable") });
+  }
+}
+
+// A slow call (a title's page, its streams): when the bridge does not answer in time it is still working, so the person is
+// told to open it again rather than shown a generic failure.
+async function slowJson(path, messageKey) {
+  try {
+    return await getJson(path, SLOW_TIMEOUT_MS, true);
+  } catch (e) {
+    // "unavailable", not "timeout": Kino words a timeout itself and would drop this sentence.
+    if (e && (e.code === "timeout" || /took too long/i.test(String(e.message || "")))) {
+      throw kino.error("unavailable", "the bridge is still preparing it", { userMessage: t(messageKey || "warming") });
+    }
+    throw e;
   }
 }
 
@@ -589,7 +609,7 @@ function idOf(ref, prefix) {
 
 async function metaOf(id) {
   return cached("meta:" + kinoId(id), FRESH_META_MS, async () => {
-    const body = await getJson(`/meta/other/${enc(id)}.json`, SLOW_TIMEOUT_MS);
+    const body = await slowJson(`/meta/other/${enc(id)}.json`);
     const m = body && body.meta;
     if (!m || typeof m !== "object") throw kino.error("not_found", "no meta");
     return {
@@ -826,11 +846,14 @@ function writeBad(bad) {
 }
 
 async function streamsOf(type, id) {
+  const startedAt = Date.now();
   for (let attempt = 0; attempt < 2; attempt++) {
-    const body = await getJson(`/stream/${type}/${enc(id)}.json`, SLOW_TIMEOUT_MS);
+    const body = await slowJson(`/stream/${type}/${enc(id)}.json`, "warmingVideo");
     const list = Array.isArray(body.streams) ? body.streams.filter(playable) : [];
     if (list.length) return list;
-    if (attempt < 1) await kino.sleep(800);
+    // a second look only when the first answered fast enough to leave time inside Kino's 20 s
+    if (attempt < 1 && Date.now() - startedAt < 6000) await kino.sleep(800);
+    else break;
   }
   return [];
 }
@@ -983,7 +1006,7 @@ export async function liveSearch({ query }) {
 const LIVE_RETRY_MS = 2 * 60 * 1000;
 
 async function resolveLive(id) {
-  const body = await getJson(`/stream/tv/${enc(id)}.json`, SLOW_TIMEOUT_MS);
+  const body = await slowJson(`/stream/tv/${enc(id)}.json`, "warmingVideo");
   const streams = (Array.isArray(body.streams) ? body.streams : []).filter(playable);
   if (!streams.length) throw kino.error("not_found", "no streams", { userMessage: t("noSignal") });
   // HLS first (a DASH copy comes through the bridge's own proxy), then the bridge's order.
