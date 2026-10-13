@@ -73,8 +73,9 @@ const TEXTS = {
     badAddress: "La dirección no es válida: debe ser la de cncverse.dpdns.org con tu código personal.",
     unavailable: "CNCVerse no responde ahora. Intenta de nuevo en un rato.",
     warming: "El puente está preparando esta lista (los títulos largos tardan la primera vez). Vuelve a abrirlo en un momento.",
+    watchNow: "Ver",
     warmingVideo: "El puente está buscando el video (puede tardar la primera vez). Vuelve a intentarlo en un momento.",
-    noStreams: "Este título no tiene video disponible por ahora. Prueba otro o vuelve más tarde.",
+    noStreams: "Esta fuente no entregó video para este título. Prueba el mismo título en otra fuente (mira la etiqueta) o vuelve más tarde.",
     noEpisodes: "Este título no trae lista de episodios.",
     noSignal: "Este canal no tiene señal ahora mismo. Si el evento aún no empieza, vuelve más tarde.",
     shelfAll: "Lo último", copy: "Opción {n}", episode: "Episodio {n}",
@@ -93,8 +94,9 @@ const TEXTS = {
     badAddress: "The address is not valid: it must be the cncverse.dpdns.org one with your personal code.",
     unavailable: "CNCVerse isn't responding right now. Try again in a while.",
     warming: "The bridge is preparing this list (long titles take longer the first time). Open it again in a moment.",
+    watchNow: "Watch",
     warmingVideo: "The bridge is looking for the video (it can take a while the first time). Try again in a moment.",
-    noStreams: "This title has no video available right now. Try another or come back later.",
+    noStreams: "This source gave no video for this title. Try the same title from another source (see the label) or come back later.",
     noEpisodes: "This title has no episode list.",
     noSignal: "This channel has no signal right now. If the event has not started yet, come back later.",
     shelfAll: "Latest", copy: "Option {n}", episode: "Episode {n}",
@@ -307,6 +309,23 @@ async function getJson(path, timeoutMs, slice) {
   }
 }
 
+// The bridge keeps scraping after the client hangs up (measured: three aborted requests, the fourth answered from what they
+// had gathered). So a request is sent and dropped at once for what the person is likely to open next: by the time they tap,
+// the page or the streams are ready. Never awaited for long and never failing the call it rides on.
+const WARM_TIMEOUT_MS = 1000;
+
+async function warmUp(paths) {
+  const list = paths.filter(Boolean).slice(0, 3);
+  if (!list.length) return;
+  let url;
+  try {
+    url = base();
+  } catch {
+    return;
+  }
+  await Promise.allSettled(list.map((p) => kino.fetch(url + p, { timeoutMs: WARM_TIMEOUT_MS, headers: { Accept: "application/json" } }).catch(() => null)));
+}
+
 // A slow call (a title's page, its streams): when the bridge does not answer in time it is still working, so the person is
 // told to open it again rather than shown a generic failure.
 async function slowJson(path, messageKey) {
@@ -410,6 +429,52 @@ function decodeId(addonId) {
 }
 const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+/** The source an id comes from: its text starts "Source::". */
+function sourceNameOf(addonId) {
+  const i = decodeId(addonId).indexOf("::");
+  return i > 0 ? decodeId(addonId).slice(0, i).slice(0, 40) : "";
+}
+
+// ---- 4b. which sources have been failing ------------------------------------------------------------------------
+
+// Some sources answer a title's page or streams in 5 s and others never (HDHub4U's often takes 35 s and ends empty). A
+// failure is remembered per source for a while: the source goes to the end of a search's results and a title from it
+// says so in its message. A success clears it.
+const FAIL_KEY = "srcfail";
+const FAIL_FOR_MS = 6 * 60 * 60 * 1000;
+const FAIL_LIMIT = 2;
+
+function readFails() {
+  try {
+    const raw = JSON.parse(kino.storage.get(FAIL_KEY) || "{}");
+    const now = Date.now();
+    const out = {};
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      for (const [k, v] of Object.entries(raw)) if (v && Number(v.until) > now && Number.isFinite(v.n)) out[k] = { n: v.n, until: Number(v.until) };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function sourceKey(x) {
+  return String(x || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function noteSource(name, ok) {
+  name = sourceKey(name);
+  if (!name) return;
+  try {
+    const fails = readFails();
+    if (ok) delete fails[name];
+    else fails[name] = { n: ((fails[name] && fails[name].n) || 0) + 1, until: Date.now() + FAIL_FOR_MS };
+    kino.storage.set(FAIL_KEY, JSON.stringify(fails), { ttlMs: FAIL_FOR_MS });
+  } catch {
+    // a full storage: the order just is not learned this time
+  }
+}
+
 const SERIES_WORDS = /\bseason\b|\bS\d{1,2}\b|\bS\d{1,2}E\d|\bseries\b|\btv[- ]?show\b|\bepisode|\bepisodes\b|\bs[ée]ries\b|\bdizi\b|\bseasons\b/i;
 const MOVIE_WORDS = /\bmovie\b|\bfilms?\b|\bfull movie\b/i;
 
@@ -418,7 +483,7 @@ const MOVIE_WORDS = /\bmovie\b|\bfilms?\b|\bfull movie\b/i;
 function kindOf(name, shelfKind, source, addonId) {
   if (shelfKind) return shelfKind;
   const page = decodeId(addonId);
-  if (/\/(?:series|tv-?series|tv-?shows?|web-?series|shows?|dizi|diziler|anime-series|episodes?)\//i.test(page)) return "series";
+  if (/\/(?:series|tv-?series|tv-?shows?|web-?series|shows?|dizi|diziler|anime-series|episodes?)\//i.test(page) || /[-_]series[-_]\d/i.test(page)) return "series";
   if (/\/(?:movies?|films?|film)\//i.test(page)) return "movie";
   if (SERIES_WORDS.test(name)) return "series";
   if (MOVIE_WORDS.test(name)) return "movie";
@@ -438,6 +503,7 @@ function toItem(m, source, shelfKind) {
   const kind = kindOf(String(m.name || ""), shelfKind, source, m.id);
   const item = { id: kinoId(m.id), ref: (kind === "movie" ? "m:" : "i:") + m.id, title, kind };
   if (typeof m.poster === "string" && m.poster.startsWith("https://")) item.poster = m.poster;
+  item.badges = [source.title.slice(0, 20)];
   const year = /\((19|20)\d{2}\)/.exec(String(m.name || ""));
   if (year) item.year = year[0].slice(1, 5);
   return item;
@@ -505,8 +571,11 @@ export async function search(query) {
     }
   });
   const merged = [];
+  const fails = readFails();
+  const bad = (i) => ((fails[sourceKey(ordered[i].title)] && fails[sourceKey(ordered[i].title)].n) || 0) >= FAIL_LIMIT;
+  const order = lists.map((_, i) => i).sort((a, b) => (bad(a) ? 1 : 0) - (bad(b) ? 1 : 0) || a - b);
   const longest = Math.max(0, ...lists.map((l) => l.length));
-  for (let i = 0; i < longest; i++) for (const l of lists) if (l[i]) merged.push(l[i]);
+  for (let i = 0; i < longest; i++) for (const k of order) if (lists[k][i]) merged.push(lists[k][i]);
   const seen = new Set();
   const unique = merged.filter((it) => {
     const key = it.title.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
@@ -514,7 +583,12 @@ export async function search(query) {
     seen.add(key);
     return true;
   });
-  return kino.rank.sortBySimilarity(unique, titles);
+  const ranked = kino.rank.sortBySimilarity(unique, titles);
+  // The first series are the ones tapped next, and their page is the slow part (a long anime, a scraped pack).
+  if (Date.now() - startedAt < 11000) {
+    await warmUp(ranked.filter((x) => x.ref.startsWith("i:")).slice(0, 3).map((x) => `/meta/other/${enc(x.ref.slice(2))}.json`));
+  }
+  return ranked;
 }
 
 // ---- 6. home, browse, categories ------------------------------------------------------------------------------
@@ -668,9 +742,25 @@ function infoOf(meta) {
 export async function episodes(ref) {
   const id = idOf(ref, "i:");
   if (!id) throw kino.error("not_found", "not a series ref: " + String(ref).slice(0, 80));
-  const meta = await metaOf(id);
+  let meta;
+  try {
+    meta = await metaOf(id);
+  } catch (e) {
+    // The bridge is still scraping the page. Rather than a dead end, the title plays as one entry: its own streams (a pack's
+    // files come together in them). The page is warming, so the next time the full list is there.
+    if (e && e.code === "unavailable") {
+      noteSource(sourceNameOf(id), false);
+      return { series: {}, episodes: [{ season: 1, number: 1, ref: "e:" + id, title: t("watchNow") }] };
+    }
+    throw e;
+  }
+  noteSource(sourceNameOf(id), true);
   const ids = await idsOf(meta, true);
   if (ids) meta.ids = ids;
+  if (meta.videos.length) {
+    const first = meta.videos.slice().sort((a, b) => a[1] - b[1] || a[2] - b[2])[0];
+    await warmUp([`/stream/other/${enc(first[0])}.json`]);
+  }
   if (!meta.videos.length) return { series: infoOf(meta), episodes: [{ season: 1, number: 1, ref: "e:" + id, title: meta.title || t("episode", { n: 1 }) }] };
   const seen = new Set();
   const eps = [];
@@ -859,7 +949,15 @@ async function streamsOf(type, id) {
 }
 
 async function resolveVideo(id, ref, options) {
-  const raw = await streamsOf("other", id);
+  const source = sourceNameOf(id);
+  let raw;
+  try {
+    raw = await streamsOf("other", id);
+  } catch (e) {
+    noteSource(source, false);
+    throw e;
+  }
+  noteSource(source, raw.length > 0);
   const seen = new Set();
   const pref = String(kino.config.get("quality") || "1080");
   const capGb = parseFloat(String(kino.config.get("maxSize") || "10")) || 0;
