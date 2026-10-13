@@ -1,10 +1,10 @@
 {
   "id": "cncverse",
   "name": "CNCVerse",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "apiVersion": 9,
   "entry": "plugin.js",
-  "description": "Películas, series, anime, eventos deportivos y TV en vivo desde tu CNCVerse Bridge. Necesitas tu dirección personal del puente.",
+  "description": "Películas, series, anime, eventos deportivos y TV en vivo desde CNCVerse Bridge. Funciona al instalarlo, sin configurar nada.",
   "author": "xuper-plugin",
   "homepage": "https://github.com/xuper-plugin/kino-plugin-cncverse",
   "hosts": [
@@ -37,11 +37,10 @@
     {
       "key": "address",
       "type": "password",
-      "required": true,
-      "label": "Dirección de CNCVerse Bridge",
-      "labelEn": "CNCVerse Bridge address",
-      "hint": "La URL de tu manifest.json, con tu código.",
-      "hintEn": "Your manifest.json URL, with your code."
+      "label": "Tu propio perfil (opcional)",
+      "labelEn": "Your own profile (optional)",
+      "hint": "Pega tu URL de CNCVerse para usar tu perfil.",
+      "hintEn": "Paste your CNCVerse URL to use your own profile."
     },
     {
       "key": "playSection",
@@ -151,5 +150,8 @@
       "confirm": "¿Vaciar la caché de listas y fichas?",
       "confirmEn": "Clear the cache of lists and titles?"
     }
-  ]
+  ],
+  "secrets": {
+    "bridgeCode": "kino-sealed:v1:0mkle0flc-78CKwJzPS3h6oSbctKL_0Eht0lFEFpDXn-v8cC6-4vp_57IkkDx9V9WS1EHY85Oc390I33JkDI6-p_P2egUhhwaUk"
+  }
 }

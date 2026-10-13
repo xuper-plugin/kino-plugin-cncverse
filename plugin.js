@@ -1,9 +1,9 @@
 // @ts-check
 /// <reference path="./kino.d.ts" />
 // Kino plugin: CNCVerse -- movies, series, anime, live sports and live TV from a CNCVerse Bridge address.
-// CNCVerse Bridge (cncverse.dpdns.org) turns CloudStream providers into a Stremio addon. The person pastes their own
-// bridge address (it carries their personal code: it is kept in the Keystore and never logged), and this plugin talks to
-// it directly. Read it top to bottom: 1. constants  2. texts  3. cache  4. bridge client  5. items  6. search
+// CNCVerse Bridge (cncverse.dpdns.org) turns CloudStream providers into a Stremio addon. The plugin uses one
+// profile address (its code is sealed in the manifest; a person's own address may replace it), and this plugin talks to it
+// directly. Read it top to bottom: 1. constants  2. texts  3. cache  4. bridge client  5. items  6. search
 // 7. home, browse, categories  8. episodes and details  9. resolve  10. live  11. settings.
 // Declared host: cncverse.dpdns.org (kino.fetch). The video is on other servers: `streamHosts: "any"` and
 // `liveStreamHosts: "any"`, which the person approves at install.
@@ -53,7 +53,7 @@ const ADULT = /adult|18\+|xxx|porn|erotic|sexy/i;
 
 const TEXTS = {
   es: {
-    needAddress: "Pega tu dirección de CNCVerse Bridge en los ajustes del plugin.",
+    needAddress: "No se pudo abrir el código sellado del plugin: instálalo desde su rama principal, sin @rama, o pega tu propia dirección en los ajustes.",
     badAddress: "La dirección no es válida: debe ser la de cncverse.dpdns.org con tu código personal.",
     unavailable: "CNCVerse no responde ahora. Intenta de nuevo en un rato.",
     noStreams: "Este título no tiene video disponible por ahora. Prueba otro o vuelve más tarde.",
@@ -69,7 +69,7 @@ const TEXTS = {
     genreEducational: "Educativo", genreBusiness: "Negocios", genreShopping: "Compras", genreLifestyle: "Estilo de vida",
   },
   en: {
-    needAddress: "Paste your CNCVerse Bridge address in the plugin's settings.",
+    needAddress: "The plugin's sealed code could not be opened: install it from its default branch, without a @branch, or paste your own address in the settings.",
     badAddress: "The address is not valid: it must be the cncverse.dpdns.org one with your personal code.",
     unavailable: "CNCVerse isn't responding right now. Try again in a while.",
     noStreams: "This title has no video available right now. Try another or come back later.",
@@ -200,11 +200,20 @@ function recordHealth(ok) {
   }
 }
 
-// The person's address, as `https://cncverse.dpdns.org/u/<code>`: a pasted `stremio://` link, a trailing /manifest.json
-// or a slash are tolerated. Anything on another host is refused (the plugin only declares that one).
+// The bridge's address. By default it is the plugin's own profile: the code in its path is sealed in the manifest
+// (`secrets.bridgeCode`), so the marker stands in for it until kino.fetch sends the request (the code never reaches this file,
+// a log or an error). A person's own address, pasted in the settings, takes its place: `https://cncverse.dpdns.org/u/<code>`,
+// a `stremio://` link and a trailing /manifest.json are tolerated; any other host is refused.
 function base() {
   let raw = String(kino.config.get("address") || "").trim();
-  if (!raw) throw kino.error("auth_required", "no bridge address", { userMessage: t("needAddress") });
+  if (!raw) {
+    try {
+      return `https://${HOST}/u/${kino.secret("bridgeCode")}`;
+    } catch {
+      // A seal only opens when the plugin is installed from its default branch, without @branch.
+      throw kino.error("auth_required", "the sealed bridge code is not available", { userMessage: t("needAddress") });
+    }
+  }
   raw = raw.replace(/^stremio:\/\//i, "https://").replace(/\/manifest\.json.*$/i, "").replace(/\/+$/, "");
   if (!/^https:\/\//i.test(raw)) raw = "https://" + raw.replace(/^https?:\/\//i, "");
   let u;

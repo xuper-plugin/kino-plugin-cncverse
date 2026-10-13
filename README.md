@@ -6,10 +6,12 @@ Stremio. Es un plugin nativo de Kino: habla directo con el puente, sin pasar por
 
 ## Instalar
 
-1. En Kino: **Plugins ▸ Agregar un plugin ▸ Kino**, y pega la dirección de este repositorio. Requiere Kino 0.9.55 o
-   posterior.
-2. En los ajustes del plugin pega **tu** dirección de CNCVerse Bridge (la URL de tu `manifest.json`, con tu código
-   personal). Se guarda cifrada en el aparato y solo se envía a `cncverse.dpdns.org`.
+En Kino: **Plugins ▸ Agregar un plugin ▸ Kino**, y pega la dirección de este repositorio (sin `@rama`: el código del
+perfil va sellado en el manifiesto y solo se abre al instalar desde la rama principal). Requiere Kino 0.9.55 o posterior.
+No hay nada que configurar.
+
+Si prefieres usar tu propio perfil de CNCVerse Bridge, pega la URL de tu `manifest.json` en el ajuste **Tu propio perfil
+(opcional)**; reemplaza al perfil incluido y se guarda cifrada en el aparato.
 
 ## Qué trae
 
@@ -28,4 +30,6 @@ Stremio. Es un plugin nativo de Kino: habla directo con el puente, sin pasar por
 - Se dejaron fuera Netflix, Prime Video, Hotstar, Disney, Marvel, Pixar y Star Wars del puente (sus tarjetas no traen
   título), RingZ y Castle TV. Los géneros "Adult" nunca se muestran.
 - Kino pide tu aprobación al instalar («Puede reproducir video desde cualquier servidor»).
+- El perfil incluido es compartido por todas las personas que instalan el plugin; el sellado es ofuscación, no un
+  secreto. Si el puente lo revoca, el plugin deja de funcionar hasta publicar uno nuevo (o hasta que pegues el tuyo).
 - No está afiliado con el puente, los sitios ni los canales que lista.
