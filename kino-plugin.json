@@ -1,0 +1,155 @@
+{
+  "id": "cncverse",
+  "name": "CNCVerse",
+  "version": "1.0.0",
+  "apiVersion": 9,
+  "entry": "plugin.js",
+  "description": "Películas, series, anime, eventos deportivos y TV en vivo desde tu CNCVerse Bridge. Necesitas tu dirección personal del puente.",
+  "author": "xuper-plugin",
+  "homepage": "https://github.com/xuper-plugin/kino-plugin-cncverse",
+  "hosts": [
+    "cncverse.dpdns.org"
+  ],
+  "capabilities": [
+    "search",
+    "home",
+    "browse",
+    "episodes",
+    "resolve",
+    "download",
+    "channels"
+  ],
+  "streamHosts": "any",
+  "liveStreamHosts": "any",
+  "categories": [
+    "movies",
+    "series"
+  ],
+  "color": "#7C5CFF",
+  "telemetry": true,
+  "settings": [
+    {
+      "key": "accessSection",
+      "type": "section",
+      "label": "Acceso",
+      "labelEn": "Access"
+    },
+    {
+      "key": "address",
+      "type": "password",
+      "required": true,
+      "label": "Dirección de CNCVerse Bridge",
+      "labelEn": "CNCVerse Bridge address",
+      "hint": "La URL de tu manifest.json, con tu código.",
+      "hintEn": "Your manifest.json URL, with your code."
+    },
+    {
+      "key": "playSection",
+      "type": "section",
+      "label": "Reproducción",
+      "labelEn": "Playback"
+    },
+    {
+      "key": "quality",
+      "type": "select",
+      "label": "Calidad preferida",
+      "labelEn": "Preferred quality",
+      "default": "1080",
+      "options": [
+        {
+          "value": "max",
+          "label": "La más alta (4K)",
+          "labelEn": "Highest (4K)"
+        },
+        {
+          "value": "1080",
+          "label": "Hasta 1080p",
+          "labelEn": "Up to 1080p"
+        },
+        {
+          "value": "720",
+          "label": "Hasta 720p",
+          "labelEn": "Up to 720p"
+        }
+      ]
+    },
+    {
+      "key": "maxSize",
+      "type": "select",
+      "label": "Tamaño máximo del archivo",
+      "labelEn": "Maximum file size",
+      "hint": "Los archivos más pesados pasan al final.",
+      "hintEn": "Heavier files go to the end.",
+      "default": "10",
+      "options": [
+        {
+          "value": "0",
+          "label": "Sin límite",
+          "labelEn": "No limit"
+        },
+        {
+          "value": "10",
+          "label": "10 GB",
+          "labelEn": "10 GB"
+        },
+        {
+          "value": "5",
+          "label": "5 GB",
+          "labelEn": "5 GB"
+        },
+        {
+          "value": "2.5",
+          "label": "2,5 GB",
+          "labelEn": "2.5 GB"
+        }
+      ]
+    },
+    {
+      "key": "homeSection",
+      "type": "section",
+      "label": "Inicio",
+      "labelEn": "Home"
+    },
+    {
+      "key": "homeRows",
+      "type": "toggle",
+      "label": "Filas en Inicio",
+      "labelEn": "Home rows",
+      "hint": "Lo último de algunas fuentes aparece en el Inicio de Kino.",
+      "hintEn": "The latest of some sources appears on Kino's Home.",
+      "default": true
+    },
+    {
+      "key": "toolsSection",
+      "type": "section",
+      "label": "Herramientas",
+      "labelEn": "Tools"
+    },
+    {
+      "key": "health",
+      "type": "status",
+      "label": "Estado del puente",
+      "labelEn": "Bridge status"
+    },
+    {
+      "key": "cache",
+      "type": "status",
+      "label": "Caché",
+      "labelEn": "Cache"
+    },
+    {
+      "key": "probe",
+      "type": "action",
+      "label": "Comprobar el puente",
+      "labelEn": "Check the bridge"
+    },
+    {
+      "key": "clearCache",
+      "type": "action",
+      "label": "Vaciar caché",
+      "labelEn": "Clear cache",
+      "confirm": "¿Vaciar la caché de listas y fichas?",
+      "confirmEn": "Clear the cache of lists and titles?"
+    }
+  ]
+}
