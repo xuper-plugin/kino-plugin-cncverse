@@ -21,7 +21,10 @@ Si prefieres usar tu propio perfil de CNCVerse Bridge, pega la URL de tu `manife
 - **Sección propia «CNCVerse»** con pestañas Inicio, Películas, Series y anime y Resúmenes, y una portada del día; tema
   de color propio.
 - **En vivo**: eventos deportivos (LivXow, PlayZTV, PlayFy, SportzX, SKTech) y JioTV por género (país IN).
-- **JioTV por idioma** (English, Hindi, Tamil, Telugu… a elegir) además de por género; los eventos próximos (`🔜`) se ocultan
+- **Solo español e inglés** por defecto: se ocultan las fuentes y estantes que el puente nombra en otro idioma (Dizilla, MovieBox IN,
+  Movix, «Hindi Dubbed», «Bangla»…) y los idiomas de JioTV que no son inglés. El ajuste **Mostrar otros idiomas** los
+  devuelve.
+- **JioTV por idioma** (English por defecto; el resto con «otros idiomas») además de por género; los eventos próximos (`🔜`) se ocultan
   por defecto.
 - **Resúmenes deportivos** (LivXow, PlayFy, SportzX): partidos ya jugados, para ver bajo demanda.
 - **Búsqueda dentro de una página** («Ver más») acotada a esa fuente.

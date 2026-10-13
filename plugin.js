@@ -54,7 +54,7 @@ const JIO_CATALOG = "cnc_JIOTV_tv";
 // JioTV+ IND 2 lists its channels by language (measured: English 181, Hindi 1253, Telugu 76, Tamil 82...).
 const JIO_LANG_CATALOG = "cnc_JIOTVPlusIND2_tv";
 const JIO_LANGS = ["English", "Hindi", "Tamil", "Telugu", "Malayalam", "Kannada", "Bengali", "Marathi", "Punjabi", "Gujarati", "Urdu"];
-const JIO_LANGS_DEFAULT = "English,Hindi,Tamil,Telugu";
+const JIO_LANGS_DEFAULT = "English";
 const JIO_VOCAB = { News: "noticias", Music: "musica", Kids: "infantil", Movies: "peliculas", Sports: "deportes", Educational: "documentales" };
 const LIVE_PAGE = 500;
 
@@ -122,10 +122,20 @@ function chosen(key) {
 
 /** The VOD sources the person has on (setting `sources`: keys or names); all of them when nothing valid is typed. */
 function activeSources() {
+  const pool = SOURCES.filter((s) => showOther() || !OTHER_SOURCES.includes(s.key));
   const want = chosen("sources");
-  if (!want) return SOURCES;
-  const on = SOURCES.filter((s) => want.includes(s.key) || want.includes(s.title.toLowerCase()));
-  return on.length ? on : SOURCES;
+  if (!want) return pool;
+  const on = pool.filter((s) => want.includes(s.key) || want.includes(s.title.toLowerCase()));
+  return on.length ? on : pool;
+}
+
+// Spanish and English only by default. Hidden unless the setting `otherLangs` is on: the sources and shelves the bridge
+// itself names by another language (Turkish and French sites, "Hindi Dubbed", "Bangla"...) and JioTV's other languages.
+const OTHER_SOURCES = ["dizilla", "movix", "moviebox"];
+const OTHER_SHELF = /hindi|bangla|bengali|south indian|bollywood|tamil|telugu|punjabi|pakistani|korean|chinese|turkish|k-?drama|c-?drama|yeni|dizi|aile|aksiyon|dram|gerilim|fantastik|bilim|nouve|netflix s[ée]ries|prime video s[ée]ries|disney\+ s[ée]ries|films?\b/i;
+
+function showOther() {
+  return kino.config.get("otherLangs") === true;
 }
 
 function isActive(key) {
@@ -432,6 +442,7 @@ function sourceOf(key) {
 async function shelfItems(source, genreIndex, skip, slice) {
   let genre = "";
   if (genreIndex > 0) genre = (await genresOf(source.catalog))[genreIndex - 1] || "";
+  if (genre && !showOther() && OTHER_SHELF.test(genre) && !/^(latest movies|hollywood|english movies|dual audio)$/i.test(genre)) return { items: [], genre };
   const extra = [genre ? "genre=" + enc(genre) : "", skip > 0 ? "skip=" + skip : ""].filter(Boolean).join("&");
   const body = await getJson(`/catalog/${source.type || "other"}/${source.catalog}${extra ? "/" + extra : ""}.json`, LIST_TIMEOUT_MS, slice);
   return { items: itemsOf(body, source, shelfKindOf(genre)), genre };
@@ -889,7 +900,8 @@ export async function liveCategories() {
   }
   genres.forEach((g, i) => out.push({ id: "jio-" + (i + 1), title: t("tileJio", { name: genreLabel(g) }), genre: JIO_VOCAB[g] || "entretenimiento", country: "IN" }));
   const want = (String(kino.config.get("jioLangs") || JIO_LANGS_DEFAULT).trim().toLowerCase() || "all");
-  const langs = want === "all" ? JIO_LANGS : want.split(",").map((x) => x.trim());
+  let langs = want === "all" ? JIO_LANGS.map((l) => l.toLowerCase()) : want.split(",").map((x) => x.trim());
+  if (!showOther()) langs = langs.filter((l) => l === "english");
   JIO_LANGS.forEach((l, i) => {
     if (langs.includes(l.toLowerCase())) out.push({ id: "jiol-" + (i + 1), title: t("tileJioLang", { name: l }), genre: "entretenimiento", country: "IN" });
   });

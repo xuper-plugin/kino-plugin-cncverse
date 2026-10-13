@@ -1,7 +1,7 @@
 {
   "id": "cncverse",
   "name": "CNCVerse",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "apiVersion": 9,
   "entry": "plugin.js",
   "description": "Películas, series, anime, resúmenes y TV deportiva en vivo desde CNCVerse Bridge. Funciona al instalarlo, sin configurar nada.",
@@ -111,6 +111,15 @@
       "labelEn": "Sources"
     },
     {
+      "key": "otherLangs",
+      "type": "toggle",
+      "label": "Mostrar otros idiomas",
+      "labelEn": "Show other languages",
+      "hint": "Hindi, turco, francés… Por defecto solo español e inglés.",
+      "hintEn": "Hindi, Turkish, French… Spanish and English only by default.",
+      "default": false
+    },
+    {
       "key": "sources",
       "type": "text",
       "label": "Fuentes de video",
@@ -192,9 +201,9 @@
       "type": "text",
       "label": "Idiomas de JioTV",
       "labelEn": "JioTV languages",
-      "default": "English,Hindi,Tamil,Telugu",
-      "hint": "all, o por comas: English, Hindi, Tamil, Telugu, Marathi…",
-      "hintEn": "all, or comma-separated: English, Hindi, Tamil, Telugu, Marathi…"
+      "default": "English",
+      "hint": "Con «otros idiomas» activo: all o por comas (Hindi, Tamil…).",
+      "hintEn": "With «other languages» on: all or comma-separated (Hindi, Tamil…)."
     },
     {
       "key": "toolsSection",
