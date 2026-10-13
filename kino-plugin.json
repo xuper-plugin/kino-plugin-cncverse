@@ -1,7 +1,7 @@
 {
   "id": "cncverse",
   "name": "CNCVerse",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "apiVersion": 9,
   "entry": "plugin.js",
   "description": "Películas, series, anime, resúmenes y TV deportiva en vivo desde CNCVerse Bridge. Funciona al instalarlo, sin configurar nada.",
@@ -105,6 +105,59 @@
       ]
     },
     {
+      "key": "sourcesSection",
+      "type": "section",
+      "label": "Fuentes",
+      "labelEn": "Sources"
+    },
+    {
+      "key": "sources",
+      "type": "text",
+      "label": "Fuentes de video",
+      "labelEn": "Video sources",
+      "default": "all",
+      "hint": "all, o por comas: HDHub4U, Kisskh, Movix, Re:ANIME…",
+      "hintEn": "all, or comma-separated: HDHub4U, Kisskh, Movix, Re:ANIME…"
+    },
+    {
+      "key": "searchIn",
+      "type": "select",
+      "label": "Buscar en",
+      "labelEn": "Search in",
+      "default": "all",
+      "options": [
+        {
+          "value": "all",
+          "label": "Todas las fuentes",
+          "labelEn": "All sources"
+        },
+        {
+          "value": "main",
+          "label": "Solo las principales (más rápido)",
+          "labelEn": "Main ones only (faster)"
+        }
+      ]
+    },
+    {
+      "key": "prefer",
+      "type": "select",
+      "label": "Preferir",
+      "labelEn": "Prefer",
+      "default": "file",
+      "options": [
+        {
+          "value": "file",
+          "label": "Archivo directo",
+          "labelEn": "Direct file"
+        },
+        {
+          "value": "hls",
+          "label": "HLS (listas)",
+          "labelEn": "HLS (playlists)"
+        }
+      ]
+    },
+    {
       "key": "homeSection",
       "type": "section",
       "label": "Inicio",
@@ -118,6 +171,30 @@
       "hint": "Lo último de algunas fuentes aparece en el Inicio de Kino.",
       "hintEn": "The latest of some sources appears on Kino's Home.",
       "default": true
+    },
+    {
+      "key": "liveSection",
+      "type": "section",
+      "label": "En vivo",
+      "labelEn": "Live"
+    },
+    {
+      "key": "hideUpcoming",
+      "type": "toggle",
+      "label": "Ocultar eventos próximos",
+      "labelEn": "Hide upcoming events",
+      "hint": "Los que aún no tienen señal.",
+      "hintEn": "The ones with no signal yet.",
+      "default": true
+    },
+    {
+      "key": "jioLangs",
+      "type": "text",
+      "label": "Idiomas de JioTV",
+      "labelEn": "JioTV languages",
+      "default": "English,Hindi,Tamil,Telugu",
+      "hint": "all, o por comas: English, Hindi, Tamil, Telugu, Marathi…",
+      "hintEn": "all, or comma-separated: English, Hindi, Tamil, Telugu, Marathi…"
     },
     {
       "key": "toolsSection",

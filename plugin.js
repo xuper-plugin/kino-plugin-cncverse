@@ -51,6 +51,10 @@ const EVENTS = [
   { id: "ev-sktech", catalog: "cnc_SKTechLiveEvents_tv", title: "SKTech" },
 ];
 const JIO_CATALOG = "cnc_JIOTV_tv";
+// JioTV+ IND 2 lists its channels by language (measured: English 181, Hindi 1253, Telugu 76, Tamil 82...).
+const JIO_LANG_CATALOG = "cnc_JIOTVPlusIND2_tv";
+const JIO_LANGS = ["English", "Hindi", "Tamil", "Telugu", "Malayalam", "Kannada", "Bengali", "Marathi", "Punjabi", "Gujarati", "Urdu"];
+const JIO_LANGS_DEFAULT = "English,Hindi,Tamil,Telugu";
 const JIO_VOCAB = { News: "noticias", Music: "musica", Kids: "infantil", Movies: "peliculas", Sports: "deportes", Educational: "documentales" };
 const LIVE_PAGE = 500;
 
@@ -70,7 +74,7 @@ const TEXTS = {
     shelfAll: "Lo último", copy: "Opción {n}", episode: "Episodio {n}",
     tabStart: "Inicio", tabMovies: "Películas", tabSeries: "Series y anime", tabHighlights: "Resúmenes",
     sectionHero: "Lo último que llegó.", tileHighlights: "Resúmenes · {name}",
-    tileEvents: "Eventos · {name}", tileJio: "JioTV · {name}", tileLive: "En vivo",
+    tileEvents: "Eventos · {name}", tileJio: "JioTV · {name}", tileJioLang: "JioTV · Idioma: {name}", tileLive: "En vivo",
     cacheStatus: "Caché: {n} entradas, {kb} KB", cacheCleared: "Listo: se vació la caché",
     healthOk: "responde", healthFail: "falla", healthNone: "sin datos",
     probeOk: "Listo: el puente responde", probeFail: "El puente no responde ahora",
@@ -88,7 +92,7 @@ const TEXTS = {
     shelfAll: "Latest", copy: "Option {n}", episode: "Episode {n}",
     tabStart: "Start", tabMovies: "Movies", tabSeries: "Series & anime", tabHighlights: "Highlights",
     sectionHero: "Fresh arrivals.", tileHighlights: "Highlights · {name}",
-    tileEvents: "Events · {name}", tileJio: "JioTV · {name}", tileLive: "Live",
+    tileEvents: "Events · {name}", tileJio: "JioTV · {name}", tileJioLang: "JioTV · Language: {name}", tileLive: "Live",
     cacheStatus: "Cache: {n} entries, {kb} KB", cacheCleared: "Done: the cache is empty",
     healthOk: "responding", healthFail: "failing", healthNone: "no data",
     probeOk: "Done: the bridge responds", probeFail: "The bridge is not responding right now",
@@ -105,6 +109,27 @@ function isSpanish() {
 function t(key, vars) {
   const template = TEXTS[isSpanish() ? "es" : "en"][key] || TEXTS.es[key] || key;
   return vars ? template.replace(/\{(\w+)\}/g, (_, k) => String(vars[k] != null ? vars[k] : "")) : template;
+}
+
+// ---- 1b. what the person chose ---------------------------------------------------------------------------------
+
+/** The names typed in a text setting (case-insensitive, comma-separated), or null for "all"/empty (everything). */
+function chosen(key) {
+  const v = String(kino.config.get(key) || "all").trim().toLowerCase();
+  if (!v || v === "all") return null;
+  return v.split(",").map((x) => x.trim()).filter(Boolean);
+}
+
+/** The VOD sources the person has on (setting `sources`: keys or names); all of them when nothing valid is typed. */
+function activeSources() {
+  const want = chosen("sources");
+  if (!want) return SOURCES;
+  const on = SOURCES.filter((s) => want.includes(s.key) || want.includes(s.title.toLowerCase()));
+  return on.length ? on : SOURCES;
+}
+
+function isActive(key) {
+  return activeSources().some((s) => s.key === key);
 }
 
 // ---- 2. cache -------------------------------------------------------------------------------------------------
@@ -277,10 +302,28 @@ async function mapLimit(list, limit, fn) {
   return out;
 }
 
-// A catalog's shelves are the `genre` options its manifest entry declares. Adult ones are dropped.
+// A catalog's shelves are its `genre` options. The bridge's manifest lists them in some builds and not in others (1.0.3382
+// has them, 1.0.3380 does not) while the filter itself works in both, so the ones measured are kept here and the manifest
+// only fills a catalog this table does not know. A fixed table also keeps a shelf's index in a ref meaning the same thing.
+// Adult shelves are never kept.
+const GENRES = {
+  cnc_JIOTV_tv: ["News", "Infotainment", "Devotional", "Educational", "Entertainment", "Business", "Kids", "Movies", "Shopping", "Sports", "Lifestyle", "Music"],
+  cnc_HDHub4U_other: ["Latest", "Bollywood", "Hollywood", "Hindi Dubbed", "South Hindi Dubbed", "Web Series"],
+  cnc_4KHDHUB_other: ["Home", "Latest Movies", "Latest Episodes", "Korean Series", "Netflix", "Amazon Prime Video", "JioHotstar", "Disney+"],
+  cnc_VegaMovies_other: ["Home", "Netflix", "Disney Plus Hotstar", "Amazon Prime", "MX Original", "Anime Series", "Korean Series"],
+  cnc_Rogmovies_other: ["Home", "Netflix", "Disney Plus Hotstar", "Amazon Prime", "MX Original"],
+  cnc_MultiMovies_other: ["Trending", "Latest Movies", "Latest TV Shows", "Anime Series", "Anime Movies", "Bollywood Movies", "Hollywood Movies", "South Indian Movies"],
+  cnc_Cinefreak_other: ["Home", "Web Series", "Bangla Movies", "Hindi Movies", "English Movies", "Dual Audio", "Bangla Dubbed", "Netflix"],
+  cnc_Movix_other: ["Nouveaux Films", "Nouvelles Séries", "Netflix Films", "Netflix Séries", "Prime Video Films", "Prime Video Séries", "Disney+ Films", "Disney+ Séries"],
+  cnc_Kisskh_other: ["Latest", "Top K-Drama", "Top C-Drama", "Movie Popular", "Movie Last Update", "TVSeries Popular", "TVSeries Last Update", "Anime Popular"],
+  cnc_Dizilla_other: ["Yeni Bölümler", "Yeni Eklenen Diziler", "Aile", "Aksiyon", "Bilim Kurgu", "Dram", "Fantastik", "Gerilim"],
+  cnc_ReANIME_ReAnime_other: ["Trending Now", "Latest Episodes", "Currently Airing", "Most Popular", "Top Rated", "New Releases", "Anime Movies", "Completed Series"],
+};
+
 async function genresOf(catalog) {
+  if (GENRES[catalog]) return GENRES[catalog];
   const all = await cached("genres", FRESH_MANIFEST_MS, async () => {
-    const m = await getJson("/manifest.json", LIST_TIMEOUT_MS);
+    const m = await getJson("/manifest.json", LIST_TIMEOUT_MS, true);
     const out = {};
     for (const c of Array.isArray(m.catalogs) ? m.catalogs : []) {
       const g = (Array.isArray(c.extra) ? c.extra : []).find((e) => e && e.name === "genre");
@@ -403,7 +446,8 @@ export async function search(query) {
   if (!q) return [];
   base();
   // Inside a "Ver más" page (capability scopedSearch): only that source. Any other page: null, Kino filters it itself.
-  let sources = SOURCES;
+  const main = String(kino.config.get("searchIn") || "all") === "main" ? HOME_SOURCES : null;
+  let sources = activeSources().filter((x) => !main || main.includes(x.key));
   if (query.within) {
     const w = /^c:([a-z0-9]+):\d{1,3}$/.exec(String(query.within));
     const only = w && sourceOf(w[1]);
@@ -457,7 +501,7 @@ async function homeRow(key) {
 export async function home() {
   if (kino.config.get("homeRows") === false) return [];
   base();
-  return (await mapLimit(HOME_SOURCES, 3, homeRow)).filter(Boolean);
+  return (await mapLimit(HOME_SOURCES.filter(isActive), 3, homeRow)).filter(Boolean);
 }
 
 // ref "c:<source>:<genre index>" (0 = the catalog's own front shelf), paged by the bridge's `skip`.
@@ -474,7 +518,7 @@ export async function browse(ref, cursor) {
 
 // Categorías: one tile per source (at most 24); the art is the first title's poster.
 export async function categories() {
-  const tiles = SOURCES.map((s) => ({ id: s.key, title: s.title, ref: `c:${s.key}:0`, source: s })).concat(
+  const tiles = activeSources().map((s) => ({ id: s.key, title: s.title, ref: `c:${s.key}:0`, source: s })).concat(
     HIGHLIGHTS.map((s) => ({ id: s.key, title: t("tileHighlights", { name: s.title }), ref: `c:${s.key}:0`, source: s })),
   );
   return (await mapLimit(tiles, 4, async (tile) => {
@@ -503,11 +547,11 @@ export async function section({ tab }) {
     { id: "series", label: t("tabSeries") },
     { id: "highlights", label: t("tabHighlights") },
   ];
-  const chosen = tabs.some((x) => x.id === tab) ? tab : tabs[0].id;
-  const keys = { start: HOME_SOURCES, movies: SECTION_MOVIES, series: SECTION_SERIES, highlights: HIGHLIGHTS.map((h) => h.key) }[chosen];
+  const tabId = tabs.some((x) => x.id === tab) ? tab : tabs[0].id;
+  const keys = { start: HOME_SOURCES, movies: SECTION_MOVIES, series: SECTION_SERIES, highlights: HIGHLIGHTS.map((h) => h.key) }[tabId].filter((k) => k.startsWith("hl") || isActive(k));
   base();
   const rows = (await mapLimit(keys, 3, homeRow)).filter(Boolean);
-  const answer = { tabs, tab: chosen, rows };
+  const answer = { tabs, tab: tabId, rows };
   const pool = rows.length ? rows[0].items.filter((x) => x.poster) : [];
   if (pool.length) {
     // Today's pick: the same all day, a different one tomorrow.
@@ -546,6 +590,28 @@ async function metaOf(id) {
   });
 }
 
+// The bridge's ids are its own, so the title is looked up in Kino's TMDB (exact title and year, never a guess) to give the
+// page the IMDb/TMDB ids the online subtitle search and the library match on. A title Kino does not know just has none.
+async function idsOf(meta, series) {
+  if (typeof kino.meta !== "function" || !meta.title) return null;
+  try {
+    const key = "ids:" + (series ? "s:" : "m:") + meta.title.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "").slice(0, 60) + ":" + (meta.year || "");
+    return await cached(key, 7 * 24 * 60 * 60 * 1000, async () => {
+      const q = { type: series ? "series" : "movie", title: meta.title, lang: kino.lang };
+      if (/^(19|20)\d{2}$/.test(String(meta.year))) q.year = parseInt(meta.year, 10);
+      const m = await kino.meta(q);
+      const ids = m && m.ids ? m.ids : {};
+      const out = {};
+      if (typeof ids.imdb === "string" && /^tt\d{5,10}$/.test(ids.imdb)) out.imdb = ids.imdb;
+      if (Number.isInteger(ids.tmdb)) out.tmdb = ids.tmdb;
+      return Object.keys(out).length ? out : null;
+    });
+  } catch (e) {
+    kino.log("ids failed: " + (e && e.message));
+    return null;
+  }
+}
+
 function infoOf(meta) {
   const info = {};
   if (meta.title) info.title = meta.title;
@@ -554,6 +620,7 @@ function infoOf(meta) {
   if (meta.overview) info.overview = meta.overview;
   if (meta.genres.length) info.genres = meta.genres;
   if (meta.year) info.year = meta.year;
+  if (meta.ids) info.ids = meta.ids;
   return info;
 }
 
@@ -563,6 +630,8 @@ export async function episodes(ref) {
   const id = idOf(ref, "i:");
   if (!id) throw kino.error("not_found", "not a series ref: " + String(ref).slice(0, 80));
   const meta = await metaOf(id);
+  const ids = await idsOf(meta, true);
+  if (ids) meta.ids = ids;
   if (!meta.videos.length) return { series: infoOf(meta), episodes: [{ season: 1, number: 1, ref: "e:" + id, title: meta.title || t("episode", { n: 1 }) }] };
   const seen = new Set();
   const eps = [];
@@ -583,8 +652,10 @@ export async function details(ref) {
   const id = movie || idOf(ref, "i:");
   if (!id) return null;
   try {
-    const info = infoOf(await metaOf(id));
-    return info;
+    const meta = await metaOf(id);
+    const ids = await idsOf(meta, !movie);
+    if (ids) meta.ids = ids;
+    return infoOf(meta);
   } catch (e) {
     kino.log("details failed: " + (e && e.message));
     return null;
@@ -611,12 +682,13 @@ function playable(s) {
   return true;
 }
 
-// Lower plays first: a direct file, then HLS, then anything else; a plain-http link (the bridge's own DASH proxy on an IP)
-// goes after every https one.
+// Lower plays first: a direct file, then HLS, then anything else (the setting `prefer` swaps the first two); a plain-http
+// link (the bridge's own DASH proxy on an IP) goes after every https one.
 function tierOf(url) {
   if (/^http:\/\//i.test(url)) return 3;
-  if (/\.m3u8(\?|$)/i.test(url)) return 1;
-  if (/\.(mkv|mp4|webm)(\?|$)/i.test(url) || /pixeldrain|\.r2\.cloudflarestorage\.com|cocktail\.beer|valentine\.guru/i.test(hostOf(url) + url)) return 0;
+  const hlsFirst = String(kino.config.get("prefer") || "file") === "hls";
+  if (/\.m3u8(\?|$)/i.test(url)) return hlsFirst ? 0 : 1;
+  if (/\.(mkv|mp4|webm)(\?|$)/i.test(url) || /pixeldrain|\.r2\.cloudflarestorage\.com|cocktail\.beer|valentine\.guru/i.test(hostOf(url) + url)) return hlsFirst ? 1 : 0;
   return 2;
 }
 
@@ -668,6 +740,24 @@ function fileKey(url) {
   return hostOf(url) + ":" + path.slice(path.lastIndexOf("/") + 1).slice(0, 40);
 }
 
+// The bridge lists subtitles with ISO 639-2 codes ("eng"); Kino takes the short code. Only https links are kept: the bridge's
+// own subtitle proxy is plain http on an IP, which Kino refuses, so those are left out rather than sent to be dropped.
+const LANG2 = { eng: "en", spa: "es", ara: "ar", ind: "id", hin: "hi", fre: "fr", fra: "fr", por: "pt", rus: "ru", tur: "tr", kor: "ko", jpn: "ja", zho: "zh", chi: "zh", ben: "bn", tam: "ta", tel: "te", vie: "vi", tha: "th", may: "ms", msa: "ms", ita: "it", ger: "de", deu: "de" };
+
+function subtitlesOf(s) {
+  const out = [];
+  const seen = new Set();
+  for (const x of Array.isArray(s.subtitles) ? s.subtitles : []) {
+    if (!x || typeof x.url !== "string" || !/^https:\/\//i.test(x.url) || seen.has(x.url)) continue;
+    seen.add(x.url);
+    const raw = String(x.lang || "und").toLowerCase().trim();
+    const lang = (LANG2[raw] || raw).slice(0, 16);
+    out.push({ lang, url: x.url, format: /\.srt(\?|$)/i.test(x.url) ? "srt" : "vtt" });
+    if (out.length >= 10) break;
+  }
+  return out;
+}
+
 function toStream(s, index) {
   const d = describe(s);
   const url = String(s.url);
@@ -680,6 +770,8 @@ function toStream(s, index) {
   if (Object.keys(headers).length) stream.headers = headers;
   const mime = mimeOf(url);
   if (mime) stream.mime = mime;
+  const subs = subtitlesOf(s);
+  if (subs.length) stream.subtitles = subs;
   return { stream, quality: d.quality, gb: d.gb, tier: tierOf(url), index, key: fileKey(url) };
 }
 
@@ -775,6 +867,8 @@ async function resolveVideo(id, ref, options) {
 function liveSpec(categoryId) {
   const ev = EVENTS.find((e) => e.id === categoryId);
   if (ev) return { catalog: ev.catalog, genre: "" };
+  const l = /^jiol-(\d{1,2})$/.exec(String(categoryId || ""));
+  if (l) return { catalog: JIO_LANG_CATALOG, genre: JIO_LANGS[parseInt(l[1], 10) - 1] || "" };
   const m = /^jio-(\d{1,2})$/.exec(String(categoryId || ""));
   return m ? { catalog: JIO_CATALOG, genreIndex: parseInt(m[1], 10) } : null;
 }
@@ -794,6 +888,11 @@ export async function liveCategories() {
     kino.log("jio genres failed: " + (e && e.message));
   }
   genres.forEach((g, i) => out.push({ id: "jio-" + (i + 1), title: t("tileJio", { name: genreLabel(g) }), genre: JIO_VOCAB[g] || "entretenimiento", country: "IN" }));
+  const want = (String(kino.config.get("jioLangs") || JIO_LANGS_DEFAULT).trim().toLowerCase() || "all");
+  const langs = want === "all" ? JIO_LANGS : want.split(",").map((x) => x.trim());
+  JIO_LANGS.forEach((l, i) => {
+    if (langs.includes(l.toLowerCase())) out.push({ id: "jiol-" + (i + 1), title: t("tileJioLang", { name: l }), genre: "entretenimiento", country: "IN" });
+  });
   return out;
 }
 
@@ -813,12 +912,15 @@ function channelOf(m, categoryId) {
 async function liveList(categoryId) {
   const spec = liveSpec(categoryId);
   if (!spec) return [];
-  let genre = "";
+  let genre = spec.genre || "";
   if (spec.genreIndex) genre = (await genresOf(JIO_CATALOG))[spec.genreIndex - 1] || "";
+  if (spec.catalog === JIO_LANG_CATALOG && !genre) return [];
   const body = await getJson(`/catalog/tv/${spec.catalog}${genre ? "/genre=" + enc(genre) : ""}.json`, SLOW_TIMEOUT_MS);
+  const hideUpcoming = kino.config.get("hideUpcoming") !== false;
   const seen = new Set();
   return (Array.isArray(body.metas) ? body.metas : []).filter((m) => {
     if (!m || typeof m.id !== "string" || !m.id.startsWith("cnc:") || m.id.length > 4000 || !String(m.name || "").trim()) return false;
+    if (hideUpcoming && /^\s*🔜/u.test(String(m.name))) return false;
     if (seen.has(m.id)) return false;
     seen.add(m.id);
     return true;
@@ -850,6 +952,7 @@ export async function liveSearch({ query }) {
   for (const metas of lists) {
     for (const m of metas) {
       if (!m || typeof m.id !== "string" || !m.id.startsWith("cnc:") || m.id.length > 4000 || seen.has(m.id) || !String(m.name || "").trim()) continue;
+      if (kino.config.get("hideUpcoming") !== false && /^\s*🔜/u.test(String(m.name))) continue;
       seen.add(m.id);
       items.push({ ...channelOf(m, ""), categoryId: undefined, adult: false });
     }
