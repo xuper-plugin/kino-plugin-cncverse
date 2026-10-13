@@ -11,6 +11,8 @@
 const HOST = "cncverse.dpdns.org";
 const ROW_MAX = 60;
 const LIST_TIMEOUT_MS = 12000;
+const SEARCH_SOURCE_TIMEOUT_MS = 8000;
+const SEARCH_START_DEADLINE_MS = 5000;
 const SLOW_TIMEOUT_MS = 30000; // a title's page or streams make the bridge scrape a site: 10-18 s is normal
 const PAGE_MAX = 100;
 const MAX_SKIP = 1000;
@@ -466,9 +468,15 @@ export async function search(query) {
     sources = [only];
   }
   const titles = [query.q, query.originalTitle].concat(Array.isArray(query.altTitles) ? query.altTitles : []).filter((x) => typeof x === "string" && x.trim());
-  const lists = await mapLimit(sources, 3, async (s) => {
+  // Kino cuts a search at 15 s, so the sources run six at a time with their own short timeout, and one that has not started
+  // by the deadline is skipped: a slow source (Re:ANIME can take 40 s) never leaves the whole search empty.
+  const startedAt = Date.now();
+  // Re:ANIME is the slow one (and the one with the anime): it starts first and gets the longest wait.
+  const ordered = sources.slice().sort((a, b) => (b.key === "reanime" ? 1 : 0) - (a.key === "reanime" ? 1 : 0));
+  const lists = await mapLimit(ordered, 6, async (s) => {
+    if (Date.now() - startedAt > SEARCH_START_DEADLINE_MS) return [];
     try {
-      const body = await getJson(`/catalog/${s.type || "other"}/${s.catalog}/search=${enc(q)}.json`, 12000, true);
+      const body = await getJson(`/catalog/${s.type || "other"}/${s.catalog}/search=${enc(q)}.json`, s.key === "reanime" ? 11000 : SEARCH_SOURCE_TIMEOUT_MS, true);
       return itemsOf(body, s, null);
     } catch (e) {
       if (e && (e.code === "auth_required" || e.code === "invalid_request")) throw e;
@@ -950,9 +958,9 @@ export async function liveSearch({ query }) {
   const q = encodeURIComponent(String(query || "").trim());
   if (!q) return { items: [] };
   const catalogs = [JIO_CATALOG].concat(EVENTS.map((e) => e.catalog));
-  const lists = await mapLimit(catalogs, 3, async (c) => {
+  const lists = await mapLimit(catalogs, 6, async (c) => {
     try {
-      const body = await getJson(`/catalog/tv/${c}/search=${q}.json`, 12000, true);
+      const body = await getJson(`/catalog/tv/${c}/search=${q}.json`, SEARCH_SOURCE_TIMEOUT_MS, true);
       return Array.isArray(body.metas) ? body.metas : [];
     } catch (e) {
       if (e && (e.code === "auth_required" || e.code === "invalid_request")) throw e;
