@@ -332,9 +332,9 @@ async function warmUp(paths) {
 
 // A slow call (a title's page, its streams): when the bridge does not answer in time it is still working, so the person is
 // told to open it again rather than shown a generic failure.
-async function slowJson(path, messageKey) {
+async function slowJson(path, messageKey, capMs) {
   try {
-    return await getJson(path, SLOW_TIMEOUT_MS, true);
+    return await getJson(path, capMs || SLOW_TIMEOUT_MS, true);
   } catch (e) {
     // "unavailable", not "timeout": Kino words a timeout itself and would drop this sentence.
     if (e && (e.code === "timeout" || /took too long/i.test(String(e.message || "")))) {
@@ -528,7 +528,7 @@ function toItem(m, source, shelfKind) {
   const title = cleanTitle(m && m.name);
   if (!m || typeof m.id !== "string" || !m.id.startsWith("cnc:") || title.length < 2) return null;
   const kind = kindOf(String(m.name || ""), shelfKind, source, m.id);
-  const item = { id: kinoId(m.id), ref: (kind === "movie" ? "m:" : "i:") + m.id, title, kind };
+  const item = { id: kinoId(m.id), ref: (kind === "movie" ? "m:" : "i:") + m.id + "|" + title.slice(0, 120), title, kind };
   if (typeof m.poster === "string" && m.poster.startsWith("https://")) item.poster = m.poster;
   item.badges = [source.title.slice(0, 20)];
   const year = /\((19|20)\d{2}\)/.exec(String(m.name || ""));
@@ -651,7 +651,7 @@ export async function search(query) {
   const ranked = kino.rank.sortBySimilarity(unique, titles);
   // The first series are the ones tapped next, and their page is the slow part (a long anime, a scraped pack).
   if (Date.now() - startedAt < 11000) {
-    await warmUp(ranked.filter((x) => x.ref.startsWith("i:")).slice(0, 3).map((x) => `/meta/other/${enc(x.ref.slice(2))}.json`));
+    await warmUp(ranked.filter((x) => x.ref.startsWith("i:")).slice(0, 3).map((x) => `/meta/other/${enc(idOf(x.ref, "i:"))}.json`));
   }
   return ranked;
 }
@@ -741,9 +741,21 @@ export async function section({ tab }) {
 
 // ---- 7. episodes and details ----------------------------------------------------------------------------------
 
-function idOf(ref, prefix) {
+// A ref is "<kind>:<bridge id>" with the title after a "|" ("m:cnc:…|Youth"): ids are base64 and never hold one. The title is
+// what lets a failing source be replaced by the same title in another (section 8c).
+function splitRef(ref) {
   const s = String(ref || "");
+  const i = s.indexOf("|");
+  return i < 0 ? { head: s, title: "" } : { head: s.slice(0, i), title: s.slice(i + 1).slice(0, 160) };
+}
+
+function idOf(ref, prefix) {
+  const s = splitRef(ref).head;
   return s.startsWith(prefix) && s.length > prefix.length ? s.slice(prefix.length) : null;
+}
+
+function titleOf(ref) {
+  return splitRef(ref).title;
 }
 
 async function metaOf(id) {
@@ -807,6 +819,8 @@ function infoOf(meta) {
 export async function episodes(ref) {
   const id = idOf(ref, "i:");
   if (!id) throw kino.error("not_found", "not a series ref: " + String(ref).slice(0, 80));
+  const listed = titleOf(ref);
+  const tag = (vid, title) => "e:" + vid + (title ? "|" + title.slice(0, 120) : "");
   let meta;
   try {
     meta = await metaOf(id);
@@ -815,7 +829,7 @@ export async function episodes(ref) {
     // files come together in them). The page is warming, so the next time the full list is there.
     if (e && e.code === "unavailable") {
       noteSource(sourceNameOf(id), false);
-      return { series: {}, episodes: [{ season: 1, number: 1, ref: "e:" + id, title: t("watchNow") }] };
+      return { series: {}, episodes: [{ season: 1, number: 1, ref: tag(id, listed), title: t("watchNow") }] };
     }
     throw e;
   }
@@ -826,14 +840,14 @@ export async function episodes(ref) {
     const first = meta.videos.slice().sort((a, b) => a[1] - b[1] || a[2] - b[2])[0];
     await warmUp([`/stream/other/${enc(first[0])}.json`]);
   }
-  if (!meta.videos.length) return { series: infoOf(meta), episodes: [{ season: 1, number: 1, ref: "e:" + id, title: meta.title || t("episode", { n: 1 }) }] };
+  if (!meta.videos.length) return { series: infoOf(meta), episodes: [{ season: 1, number: 1, ref: tag(id, listed || meta.title), title: meta.title || t("episode", { n: 1 }) }] };
   const seen = new Set();
   const eps = [];
   for (const [vid, season, number, title, still] of meta.videos.slice().sort((a, b) => a[1] - b[1] || a[2] - b[2])) {
     const key = season + ":" + number;
     if (seen.has(key)) continue;
     seen.add(key);
-    const ep = { season: season || 1, number, ref: "e:" + vid };
+    const ep = { season: season || 1, number, ref: tag(vid, listed || meta.title) };
     if (title) ep.title = title;
     if (still) ep.still = still;
     eps.push(ep);
@@ -1000,29 +1014,136 @@ function writeBad(bad) {
   }
 }
 
-async function streamsOf(type, id) {
+async function streamsOf(type, id, capMs, retry) {
   const startedAt = Date.now();
   for (let attempt = 0; attempt < 2; attempt++) {
-    const body = await slowJson(`/stream/${type}/${enc(id)}.json`, "warmingVideo");
+    const body = await slowJson(`/stream/${type}/${enc(id)}.json`, "warmingVideo", capMs);
     const list = Array.isArray(body.streams) ? body.streams.filter(playable) : [];
     if (list.length) return list;
     // a second look only when the first answered fast enough to leave time inside Kino's 20 s
-    if (attempt < 1 && Date.now() - startedAt < 6000) await kino.sleep(800);
+    if (retry !== false && attempt < 1 && Date.now() - startedAt < 6000) await kino.sleep(800);
     else break;
   }
   return [];
 }
 
-async function resolveVideo(id, ref, options) {
-  const source = sourceNameOf(id);
-  let raw;
-  try {
-    raw = await streamsOf("other", id);
-  } catch (e) {
-    noteSource(source, false);
-    throw e;
+// ---- 8c. the same title in another source ---------------------------------------------------------------------
+
+const RESOLVE_BUDGET_MS = 18500; // inside the 20 s Kino gives a resolve
+const XSRC_PREFIX = "xsrc:";
+const XSRC_FOR_MS = 6 * 60 * 60 * 1000;
+
+/** A title reduced to what two sources agree on: no season, year, tags or punctuation. */
+function normTitle(title) {
+  return String(title || "")
+    .toLowerCase()
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/\(.*?\)|\[.*?\]|\{.*?\}/g, " ")
+    .replace(/\b(?:season|temporada)\s*\d+.*$/i, " ")
+    .replace(/\bs\d{1,2}\b.*$/i, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function seasonOf(title) {
+  const m = /\bseason\s*(\d+)|\btemporada\s*(\d+)|\bS(\d{1,2})\b/i.exec(String(title || ""));
+  return m ? parseInt(m[1] || m[2] || m[3], 10) : null;
+}
+
+// A page-level id ("HDHub4U::https://…") has the title's files together; an episode's id (a JSON or "cncvariants") is one video.
+function isPageId(id) {
+  const d = decodeId(id);
+  return /^[^:{]+::https?:\/\//.test(d) && !/cncvariants/.test(d);
+}
+
+// Searches the other sources for the title, quickest first, and asks the first exact match for its streams. All of it inside
+// what is left of the resolve's budget; a match whose streams are not ready yet is warmed for the next try.
+async function crossSource(title, skipName, startedAt) {
+  const want = normTitle(title);
+  if (want.length < 2) return null;
+  const wantSeason = seasonOf(title);
+  const skip = sourceKey(skipName);
+  const lat = readLatency();
+  const pool = activeSources()
+    .filter((s) => sourceKey(s.title) !== skip && sourceKey(s.key) !== skip)
+    .sort((x, y) => (lat[x.key] || LATENCY_SEED_MS[x.key] || LATENCY_UNKNOWN_MS) - (lat[y.key] || LATENCY_SEED_MS[y.key] || LATENCY_UNKNOWN_MS));
+  for (const s of pool) {
+    let left = RESOLVE_BUDGET_MS - (Date.now() - startedAt);
+    if (left < 5000) return null;
+    let metas = [];
+    try {
+      const body = await getJson(`/catalog/${s.type || "other"}/${s.catalog}/search=${enc(title.replace(/\(.*?\)|\[.*?\]/g, " ").trim().slice(0, 60))}.json`, Math.min(2500, left - 3500), true);
+      metas = Array.isArray(body.metas) ? body.metas : [];
+    } catch {
+      continue;
+    }
+    const hit = metas.find((m) => {
+      if (!m || typeof m.id !== "string" || !m.id.startsWith("cnc:")) return false;
+      const name = cleanTitle(m.name);
+      if (normTitle(name) !== want) return false;
+      const season = seasonOf(m.name);
+      return wantSeason === null || season === null || season === wantSeason;
+    });
+    if (!hit) continue;
+    left = RESOLVE_BUDGET_MS - (Date.now() - startedAt);
+    if (left < 3000) return null;
+    try {
+      const raw = await streamsOf("other", hit.id, Math.min(8000, left - 500), false);
+      if (raw.length) return { raw, id: hit.id, source: s.title };
+    } catch {
+      // not ready: warmed below
+    }
+    await warmUp([`/stream/other/${enc(hit.id)}.json`]);
+    return null;
   }
-  noteSource(source, raw.length > 0);
+  return null;
+}
+
+async function resolveVideo(id, ref, options) {
+  const startedAt = Date.now();
+  const source = sourceNameOf(id);
+  const title = titleOf(ref);
+  const head = splitRef(ref).head;
+  const canSwap = title.length > 1 && (head.startsWith("m:") || isPageId(id));
+  const memKey = XSRC_PREFIX + kino.crypto.hash("sha1", head).slice(0, 24);
+  let raw = [];
+  let from = "";
+  let failure = null;
+  // The same title was already found in another source for this ref: that one first (it was warm a moment ago).
+  if (canSwap) {
+    try {
+      const mem = JSON.parse(kino.storage.get(memKey) || "null");
+      if (mem && typeof mem.id === "string") {
+        raw = await streamsOf("other", mem.id, 8000, false);
+        if (raw.length) from = String(mem.source || "");
+      }
+    } catch {
+      raw = [];
+    }
+  }
+  if (!raw.length) {
+    try {
+      raw = await streamsOf("other", id, canSwap ? 9000 : undefined, !canSwap);
+    } catch (e) {
+      failure = e;
+    }
+    noteSource(source, raw.length > 0);
+  }
+  if (!raw.length && canSwap) {
+    const swap = await crossSource(title, source, startedAt);
+    if (swap) {
+      raw = swap.raw;
+      from = swap.source;
+      try {
+        kino.storage.set(memKey, JSON.stringify({ id: swap.id, source: swap.source }), { ttlMs: XSRC_FOR_MS });
+      } catch {
+        // not remembered
+      }
+    }
+  }
+  if (!raw.length) {
+    if (failure) throw failure;
+    throw kino.error("not_found", "no playable streams", { userMessage: t("noStreams") });
+  }
   const seen = new Set();
   const pref = String(kino.config.get("quality") || "1080");
   const capGb = parseFloat(String(kino.config.get("maxSize") || "10")) || 0;
@@ -1060,8 +1181,9 @@ async function resolveVideo(id, ref, options) {
   } catch {
     // not remembered: the next play just starts from the same order
   }
-  const main = { ...first.stream, expiresInSeconds: 1800 };
-  const alternatives = rest.slice(0, 8).map((x) => x.stream);
+  const mark = (st) => (from ? { ...st, label: `${from} · ${st.label}`.slice(0, 48) } : st);
+  const main = { ...mark(first.stream), expiresInSeconds: 1800 };
+  const alternatives = rest.slice(0, 8).map((x) => mark(x.stream));
   if (alternatives.length) main.alternatives = alternatives;
   return main;
 }

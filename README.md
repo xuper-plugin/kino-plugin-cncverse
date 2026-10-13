@@ -44,6 +44,10 @@ Si prefieres usar tu propio perfil de CNCVerse Bridge, pega la URL de tu `manife
 - El puente rastrea los sitios al pedir un título: una ficha o una lista pueden tardar de 5 a 20 segundos. Un anime largo
   (Bleach: 366 capítulos) puede pasar los 20 s que Kino da a una lista la primera vez: el puente sigue trabajando y al
   abrirlo otra vez responde. Re:ANIME lista los capítulos pero hoy casi no entrega video; otras fuentes sí.
+- **Respaldo entre fuentes**: si la fuente de un título (una película o un paquete de temporada) no entrega video, el
+  plugin busca el mismo título en las demás, de la más rápida a la más lenta, y reproduce el de la primera que lo tiene; la
+  copia lleva el nombre de esa fuente y se recuerda 6 horas para ese título. Dura lo que Kino da a una reproducción (20 s),
+  así que funciona mejor con fuentes ya «calientes». No cubre un capítulo suelto de otra fuente.
 - Cada título lleva una etiqueta con su fuente. El puente trata cada fuente distinto: unas responden en segundos y otras
   (HDHub4U sobre todo) se quedan sin video o tardan 35 s o más. El plugin recuerda 6 horas qué fuentes fallaron y las pone
   al final de las búsquedas. Si una fuente no entrega video, prueba el mismo título en otra (otra etiqueta); el puente
