@@ -11,8 +11,12 @@
 const HOST = "cncverse.dpdns.org";
 const ROW_MAX = 60;
 const LIST_TIMEOUT_MS = 12000;
-const SEARCH_SOURCE_TIMEOUT_MS = 8000;
-const SEARCH_START_DEADLINE_MS = 5000;
+const SEARCH_FIRST_PASS_MS = 4000;
+const SEARCH_SOURCE_TIMEOUT_MS = 9000;
+const SEARCH_BUDGET_MS = 11000; // inside the 15 s Kino gives a search
+const LATENCY_UNKNOWN_MS = 5000;
+// Measured on a quiet bridge, in ms: where a never-searched source starts in the order.
+const LATENCY_SEED_MS = { rog: 300, cinefreak: 400, movix: 600, moviebox: 600, multi: 1500, reanime: 1500, kisskh: 3300, "4khdhub": 8800, vega: 10700, hdhub4u: 13000, dizilla: 600 };
 // A title's page or streams make the bridge scrape a site: 10-18 s is normal, a long anime's first episode list can pass 60 s.
 // Kino ends episodes/details/resolve at 20 s, so a call waits 17 s: the bridge keeps what it scraped, and asking again answers.
 const SLOW_TIMEOUT_MS = 17000;
@@ -475,6 +479,29 @@ function noteSource(name, ok) {
   }
 }
 
+// How long each source took to answer a search, smoothed: the next search asks the quick ones first.
+const LAT_KEY = "srclat2";
+
+function readLatency() {
+  try {
+    const raw = JSON.parse(kino.storage.get(LAT_KEY) || "{}");
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+function noteLatency(key, ms) {
+  try {
+    const all = readLatency();
+    const prev = Number(all[key]);
+    all[key] = Math.round(Number.isFinite(prev) && prev > 0 ? prev * 0.6 + ms * 0.4 : ms);
+    kino.storage.set(LAT_KEY, JSON.stringify(all), { ttlMs: 7 * 24 * 60 * 60 * 1000 });
+  } catch {
+    // a full storage: the order just is not learned this time
+  }
+}
+
 const SERIES_WORDS = /\bseason\b|\bS\d{1,2}\b|\bS\d{1,2}E\d|\bseries\b|\btv[- ]?show\b|\bepisode|\bepisodes\b|\bs[ée]ries\b|\bdizi\b|\bseasons\b/i;
 const MOVIE_WORDS = /\bmovie\b|\bfilms?\b|\bfull movie\b/i;
 
@@ -554,22 +581,60 @@ export async function search(query) {
     sources = [only];
   }
   const titles = [query.q, query.originalTitle].concat(Array.isArray(query.altTitles) ? query.altTitles : []).filter((x) => typeof x === "string" && x.trim());
-  // Kino cuts a search at 15 s, so the sources run six at a time with their own short timeout, and one that has not started
-  // by the deadline is skipped: a slow source (Re:ANIME can take 40 s) never leaves the whole search empty.
+  // Kino cuts a search at 15 s, and the bridge answers searches one at a time (measured: six at once and every source slowed
+  // to the sum, all of them missing the cut). So the sources go one after another, the quickest first (latency is
+  // remembered; the first time a measured order is used), inside one budget; whatever has answered by then is the result.
+  // When Kino asks for one specific title (it sends a year or a TMDB id), an exact match ends the round early.
   const startedAt = Date.now();
-  // Re:ANIME is the slow one (and the one with the anime): it starts first and gets the longest wait.
-  const ordered = sources.slice().sort((a, b) => (b.key === "reanime" ? 1 : 0) - (a.key === "reanime" ? 1 : 0));
-  const lists = await mapLimit(ordered, 6, async (s) => {
-    if (Date.now() - startedAt > SEARCH_START_DEADLINE_MS) return [];
+  const lat = readLatency();
+  const ordered = sources.slice().sort((x, y) => (lat[x.key] || LATENCY_SEED_MS[x.key] || LATENCY_UNKNOWN_MS) - (lat[y.key] || LATENCY_SEED_MS[y.key] || LATENCY_UNKNOWN_MS));
+  const wantExact = (query.year > 0 || query.tmdbId > 0) && !query.within;
+  const flat = (x) => String(x || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+  const targets = titles.map(flat).filter(Boolean);
+  const results = new Map();
+  let done = false;
+  async function ask(s, cap) {
+    const left = SEARCH_BUDGET_MS - (Date.now() - startedAt);
+    if (left < 1500) return null;
+    const t0 = Date.now();
     try {
-      const body = await getJson(`/catalog/${s.type || "other"}/${s.catalog}/search=${enc(q)}.json`, s.key === "reanime" ? 11000 : SEARCH_SOURCE_TIMEOUT_MS, true);
-      return itemsOf(body, s, null);
+      const body = await getJson(`/catalog/${s.type || "other"}/${s.catalog}/search=${enc(q)}.json`, Math.min(cap, left), true);
+      noteLatency(s.key, Date.now() - t0);
+      const items = itemsOf(body, s, null);
+      kino.log(`search ${s.key}: ${items.length} in ${Date.now() - t0} ms`);
+      return items;
     } catch (e) {
       if (e && (e.code === "auth_required" || e.code === "invalid_request")) throw e;
-      kino.log("search " + s.key + " failed: " + (e && e.message));
-      return [];
+      noteLatency(s.key, cap * 2);
+      kino.log(`search ${s.key} failed after ${Date.now() - t0} ms: ` + (e && e.message));
+      return null;
     }
-  });
+  }
+  // Two passes: a short wait per source first, so one that hangs cannot spend the budget; then the ones that did not answer
+  // get what is left (the bridge went on scraping after the first try hung up, so the second often answers at once).
+  const retry = [];
+  for (const s of ordered) {
+    if (done) break;
+    const items = await ask(s, SEARCH_FIRST_PASS_MS);
+    if (items === null) {
+      retry.push(s);
+      continue;
+    }
+    results.set(s.key, items);
+    if (wantExact && items.some((it) => targets.includes(flat(it.title)))) done = true;
+  }
+  for (const s of retry) {
+    if (done) break;
+    const items = await ask(s, SEARCH_SOURCE_TIMEOUT_MS);
+    if (items === null) continue;
+    results.set(s.key, items);
+    if (wantExact && items.some((it) => targets.includes(flat(it.title)))) done = true;
+  }
+  // Not one source answered: the bridge itself is down or hung. Say so, instead of an empty list that reads "not found".
+  if (results.size === 0 && retry.length > 0) {
+    throw kino.error("unavailable", "no source answered the search", { userMessage: t("unavailable") });
+  }
+  const lists = ordered.map((s) => results.get(s.key) || []);
   const merged = [];
   const fails = readFails();
   const bad = (i) => ((fails[sourceKey(ordered[i].title)] && fails[sourceKey(ordered[i].title)].n) || 0) >= FAIL_LIMIT;

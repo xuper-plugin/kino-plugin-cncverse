@@ -38,6 +38,9 @@ Si prefieres usar tu propio perfil de CNCVerse Bridge, pega la URL de tu `manife
 - Casi todo el contenido está en hindi o inglés. Los subtítulos del puente que son https se pasan al reproductor; los que
   viajan por su proxy en http no los acepta Kino. Para español usa **Buscar subtítulos en línea**: las fichas llevan los
   ids de IMDb/TMDB (buscados por título) para que acierte.
+- La búsqueda pregunta a las fuentes una por una, las más rápidas primero (el puente atiende las búsquedas casi en serie:
+  preguntar a todas a la vez las hacía fallar a todas). Si ninguna responde, el plugin dice que el puente no responde en
+  lugar de «no se encontró».
 - El puente rastrea los sitios al pedir un título: una ficha o una lista pueden tardar de 5 a 20 segundos. Un anime largo
   (Bleach: 366 capítulos) puede pasar los 20 s que Kino da a una lista la primera vez: el puente sigue trabajando y al
   abrirlo otra vez responde. Re:ANIME lista los capítulos pero hoy casi no entrega video; otras fuentes sí.
