@@ -1,1363 +1,945 @@
 // @ts-check
 /// <reference path="./kino.d.ts" />
-// Kino plugin: CNCVerse -- movies, series, anime, live sports and live TV from a CNCVerse Bridge address.
-// CNCVerse Bridge (cncverse.dpdns.org) turns CloudStream providers into a Stremio addon. The plugin uses one
-// profile address (its code is sealed in the manifest; a person's own address may replace it), and this plugin talks to it
-// directly. Read it top to bottom: 1. constants  2. texts  3. cache  4. bridge client  5. items  6. search
-// 7. home, browse, categories  8. episodes and details  9. resolve  10. live  11. settings.
-// Declared host: cncverse.dpdns.org (kino.fetch). The video is on other servers: `streamHosts: "any"` and
-// `liveStreamHosts: "any"`, which the person approves at install.
+// CNCVerse: a bridge between Kino and a Stremio-protocol server. The server owns the catalogs, the sources and their
+// upkeep; this file only translates its answers into Kino's API, and knows nothing about any of its sources. Everything
+// it needs comes from the server's manifest at run time, so a catalog added or removed there shows up here untouched.
+// Read it top to bottom: 1. texts  2. http  3. manifest  4. memory  5. items  6. catalogs  7. titles  8. streams
+//                        9. live channels  10. subtitles  11. settings
 
-const HOST = "cncverse.dpdns.org";
-const ROW_MAX = 60;
-const LIST_TIMEOUT_MS = 12000;
-const SEARCH_FIRST_PASS_MS = 4000;
-const SEARCH_SOURCE_TIMEOUT_MS = 9000;
-const SEARCH_BUDGET_MS = 11000; // inside the 15 s Kino gives a search
-const LATENCY_UNKNOWN_MS = 5000;
-// Measured on a quiet bridge, in ms: where a never-searched source starts in the order.
-const LATENCY_SEED_MS = { rog: 300, cinefreak: 400, movix: 600, moviebox: 600, multi: 1500, reanime: 1500, kisskh: 3300, "4khdhub": 8800, vega: 10700, hdhub4u: 13000, dizilla: 600 };
-// A title's page or streams make the bridge scrape a site: 10-18 s is normal, a long anime's first episode list can pass 60 s.
-// Kino ends episodes/details/resolve at 20 s, so a call waits 17 s: the bridge keeps what it scraped, and asking again answers.
-const SLOW_TIMEOUT_MS = 17000;
-const PAGE_MAX = 100;
-const MAX_SKIP = 1000;
+const BASE = "https://cncverse.dpdns.org";
 
-// The bridge's on-demand catalogs worth listing, measured one by one. `kind` is what a title of that source is when its
-// name and shelf say nothing. Left out on purpose: Netflix, Prime Video, Hotstar, Disney, Marvel, Pixar and Star Wars
-// (their cards have no title, only a poster), RingZ (2.6k titles, a search takes 40 s), Castle TV (needs VLC) and the
-// duplicated Movix (tv) and Re:ANIME catalogs.
-const SOURCES = [
-  { key: "hdhub4u", catalog: "cnc_HDHub4U_other", title: "HDHub4U", kind: "movie" },
-  { key: "4khdhub", catalog: "cnc_4KHDHUB_other", title: "4K HDHUB", kind: "movie" },
-  { key: "vega", catalog: "cnc_VegaMovies_other", title: "VegaMovies", kind: "movie" },
-  { key: "rog", catalog: "cnc_Rogmovies_other", title: "Rogmovies", kind: "movie" },
-  { key: "multi", catalog: "cnc_MultiMovies_other", title: "MultiMovies", kind: "movie" },
-  { key: "cinefreak", catalog: "cnc_Cinefreak_other", title: "Cinefreak", kind: "movie" },
-  { key: "moviebox", catalog: "cnc_MovieBoxIN_other", title: "MovieBox IN", kind: "movie" },
-  { key: "movix", catalog: "cnc_Movix_other", title: "Movix", kind: "movie" },
-  { key: "kisskh", catalog: "cnc_Kisskh_other", title: "Kisskh", kind: "series" },
-  { key: "dizilla", catalog: "cnc_Dizilla_other", title: "Dizilla", kind: "series" },
-  { key: "reanime", catalog: "cnc_ReANIME_ReAnime_other", title: "Re:ANIME", kind: "series" },
-];
-// The bridge's match replays ("Highlights") are on-demand videos listed under its tv type; they have their own tab and tiles.
-const HIGHLIGHTS = [
-  { key: "hllivxow", catalog: "cnc_LivXowHighlights_tv", type: "tv", title: "LivXow", kind: "movie" },
-  { key: "hlplayfy", catalog: "cnc_PlayFyHighlights_tv", type: "tv", title: "PlayFy", kind: "movie" },
-  { key: "hlsportzx", catalog: "cnc_SportzXHighlights_tv", type: "tv", title: "SportzX", kind: "movie" },
-];
-const HOME_SOURCES = ["hdhub4u", "4khdhub", "kisskh", "reanime", "movix"];
-const SECTION_MOVIES = ["hdhub4u", "4khdhub", "vega", "rog", "multi", "cinefreak", "moviebox", "movix"];
-const SECTION_SERIES = ["kisskh", "dizilla", "reanime"];
-
-// Live: the sports-event catalogs and JioTV, split by its own genres. `vocab` is Kino's closed genre vocabulary.
-const EVENTS = [
-  { id: "ev-livxow", catalog: "cnc_LivXowLiveEvents_tv", title: "LivXow" },
-  { id: "ev-playztv", catalog: "cnc_PlayZTVLiveEvents_tv", title: "PlayZTV" },
-  { id: "ev-playfy", catalog: "cnc_PlayFyLiveEvents_tv", title: "PlayFy" },
-  { id: "ev-sportzx", catalog: "cnc_SportzXLiveEvents_tv", title: "SportzX" },
-  { id: "ev-sktech", catalog: "cnc_SKTechLiveEvents_tv", title: "SKTech" },
-];
-const JIO_CATALOG = "cnc_JIOTV_tv";
-// JioTV+ IND 2 lists its channels by language (measured: English 181, Hindi 1253, Telugu 76, Tamil 82...).
-const JIO_LANG_CATALOG = "cnc_JIOTVPlusIND2_tv";
-const JIO_LANGS = ["English", "Hindi", "Tamil", "Telugu", "Malayalam", "Kannada", "Bengali", "Marathi", "Punjabi", "Gujarati", "Urdu"];
-const JIO_LANGS_DEFAULT = "English";
-const JIO_VOCAB = { News: "noticias", Music: "musica", Kids: "infantil", Movies: "peliculas", Sports: "deportes", Educational: "documentales" };
-const LIVE_PAGE = 500;
-
-// Adult is never offered: not a shelf, not a title.
-const ADULT = /adult|18\+|xxx|porn|erotic|sexy/i;
-
-// ---- 1. texts -------------------------------------------------------------------------------------------------
+// ---- 1. texts ----------------------------------------------------------------------------------------------------
 
 const TEXTS = {
   es: {
-    needAddress: "No se pudo abrir el código sellado del plugin: instálalo desde su rama principal, sin @rama, o pega tu propia dirección en los ajustes.",
-    badAddress: "La dirección no es válida: debe ser la de cncverse.dpdns.org con tu código personal.",
-    unavailable: "CNCVerse no responde ahora. Intenta de nuevo en un rato.",
-    warming: "El puente está preparando esta lista (los títulos largos tardan la primera vez). Vuelve a abrirlo en un momento.",
-    watchNow: "Ver",
-    warmingVideo: "El puente está buscando el video (puede tardar la primera vez). Vuelve a intentarlo en un momento.",
-    noStreams: "Esta fuente no entregó video para este título. Prueba el mismo título en otra fuente (mira la etiqueta) o vuelve más tarde.",
-    noEpisodes: "Este título no trae lista de episodios.",
-    noSignal: "Este canal no tiene señal ahora mismo. Si el evento aún no empieza, vuelve más tarde.",
-    shelfAll: "Lo último", copy: "Opción {n}", episode: "Episodio {n}",
-    tabStart: "Inicio", tabMovies: "Películas", tabSeries: "Series y anime", tabHighlights: "Resúmenes",
-    sectionHero: "Lo último que llegó.", tileHighlights: "Resúmenes · {name}",
-    tileEvents: "Eventos · {name}", tileJio: "JioTV · {name}", tileJioLang: "JioTV · Idioma: {name}", tileLive: "En vivo",
-    cacheStatus: "Caché: {n} entradas, {kb} KB", cacheCleared: "Listo: se vació la caché",
-    healthOk: "responde", healthFail: "falla", healthNone: "sin datos",
-    probeOk: "Listo: el puente responde", probeFail: "El puente no responde ahora",
-    genreSports: "Deportes", genreNews: "Noticias", genreMusic: "Música", genreKids: "Infantil", genreMovies: "Películas",
-    genreEntertainment: "Entretenimiento", genreInfotainment: "Infoentretenimiento", genreDevotional: "Devocional",
-    genreEducational: "Educativo", genreBusiness: "Negocios", genreShopping: "Compras", genreLifestyle: "Estilo de vida",
+    timeout: "El servidor no responde. Inténtalo de nuevo en un momento.",
+    network: "No se pudo conectar con el servidor.",
+    server: "El servidor respondió {status}.",
+    notStremio: "El servidor no respondió con el formato esperado.",
+    noStreams: "Este título no tiene fuentes disponibles ahora.",
+    noChannel: "Este canal no está disponible ahora.",
+    drmOnly: "Este canal solo se ofrece con una protección que este reproductor no admite.",
+    notYet: "Esta transmisión todavía no empieza.",
+    unknownRef: "Referencia desconocida.",
+    ok: "Conectado: {catalogs} catálogos. Contenido y reproducción comprobados.",
+    stepManifest: "No se pudo leer el manifiesto del servidor: {detail}",
+    stepCatalog: "El manifiesto está bien, pero falló un catálogo: {detail}",
+    stepMeta: "Los catálogos están bien, pero falló la ficha de un título: {detail}",
+    stepStream: "La ficha está bien, pero falló la reproducción de un título: {detail}",
+    unchecked: "Sin comprobar",
+    offline: "Sin conexión: {detail}",
+    online: "Conectado: {catalogs} catálogos",
+    movieEpisode: "Película",
   },
   en: {
-    needAddress: "The plugin's sealed code could not be opened: install it from its default branch, without a @branch, or paste your own address in the settings.",
-    badAddress: "The address is not valid: it must be the cncverse.dpdns.org one with your personal code.",
-    unavailable: "CNCVerse isn't responding right now. Try again in a while.",
-    warming: "The bridge is preparing this list (long titles take longer the first time). Open it again in a moment.",
-    watchNow: "Watch",
-    warmingVideo: "The bridge is looking for the video (it can take a while the first time). Try again in a moment.",
-    noStreams: "This source gave no video for this title. Try the same title from another source (see the label) or come back later.",
-    noEpisodes: "This title has no episode list.",
-    noSignal: "This channel has no signal right now. If the event has not started yet, come back later.",
-    shelfAll: "Latest", copy: "Option {n}", episode: "Episode {n}",
-    tabStart: "Start", tabMovies: "Movies", tabSeries: "Series & anime", tabHighlights: "Highlights",
-    sectionHero: "Fresh arrivals.", tileHighlights: "Highlights · {name}",
-    tileEvents: "Events · {name}", tileJio: "JioTV · {name}", tileJioLang: "JioTV · Language: {name}", tileLive: "Live",
-    cacheStatus: "Cache: {n} entries, {kb} KB", cacheCleared: "Done: the cache is empty",
-    healthOk: "responding", healthFail: "failing", healthNone: "no data",
-    probeOk: "Done: the bridge responds", probeFail: "The bridge is not responding right now",
-    genreSports: "Sports", genreNews: "News", genreMusic: "Music", genreKids: "Kids", genreMovies: "Movies",
-    genreEntertainment: "Entertainment", genreInfotainment: "Infotainment", genreDevotional: "Devotional",
-    genreEducational: "Educational", genreBusiness: "Business", genreShopping: "Shopping", genreLifestyle: "Lifestyle",
+    timeout: "The server isn't responding. Try again in a moment.",
+    network: "Could not reach the server.",
+    server: "The server answered {status}.",
+    notStremio: "The server did not answer in the expected format.",
+    noStreams: "This title has no sources available right now.",
+    noChannel: "This channel is not available right now.",
+    drmOnly: "This channel is only offered with a protection this player does not support.",
+    notYet: "This broadcast has not started yet.",
+    unknownRef: "Unknown reference.",
+    ok: "Connected: {catalogs} catalogs. Content and playback checked.",
+    stepManifest: "Could not read the server's manifest: {detail}",
+    stepCatalog: "The manifest is fine, but a catalog failed: {detail}",
+    stepMeta: "The catalogs are fine, but a title's page failed: {detail}",
+    stepStream: "The title's page is fine, but playing a title failed: {detail}",
+    unchecked: "Not checked",
+    offline: "Offline: {detail}",
+    online: "Connected: {catalogs} catalogs",
+    movieEpisode: "Movie",
   },
 };
 
-function isSpanish() {
-  return String(kino.lang || "").toLowerCase().startsWith("es");
-}
-
 function t(key, vars) {
-  const template = TEXTS[isSpanish() ? "es" : "en"][key] || TEXTS.es[key] || key;
-  return vars ? template.replace(/\{(\w+)\}/g, (_, k) => String(vars[k] != null ? vars[k] : "")) : template;
+  const lang = String(kino.lang || "").toLowerCase().startsWith("es") ? "es" : "en";
+  const tpl = TEXTS[lang][key] || TEXTS.es[key] || key;
+  return vars ? tpl.replace(/\{(\w+)\}/g, (_, k) => String(vars[k] != null ? vars[k] : "")) : tpl;
 }
 
-// ---- 1b. what the person chose ---------------------------------------------------------------------------------
+// ---- 2. http -----------------------------------------------------------------------------------------------------
 
-/** The names typed in a text setting (case-insensitive, comma-separated), or null for "all"/empty (everything). */
-function chosen(key) {
-  const v = String(kino.config.get(key) || "all").trim().toLowerCase();
-  if (!v || v === "all") return null;
-  return v.split(",").map((x) => x.trim()).filter(Boolean);
+function enc(s) {
+  return encodeURIComponent(String(s));
 }
 
-/** The VOD sources the person has on (setting `sources`: keys or names); all of them when nothing valid is typed. */
-function activeSources() {
-  const pool = SOURCES.filter((s) => showOther() || !OTHER_SOURCES.includes(s.key));
-  const want = chosen("sources");
-  if (!want) return pool;
-  const on = pool.filter((s) => want.includes(s.key) || want.includes(s.title.toLowerCase()));
-  return on.length ? on : pool;
+/** The first two segments of a path ("/stream/tv"): enough to tell what failed, never an id. */
+function route(path) {
+  return path.split("/").slice(0, 3).join("/");
 }
 
-// Spanish and English only by default. Hidden unless the setting `otherLangs` is on: the sources and shelves the bridge
-// itself names by another language (Turkish and French sites, "Hindi Dubbed", "Bangla"...) and JioTV's other languages.
-const OTHER_SOURCES = ["dizilla", "movix", "moviebox"];
-const OTHER_SHELF = /hindi|bangla|bengali|south indian|bollywood|tamil|telugu|punjabi|pakistani|korean|chinese|turkish|k-?drama|c-?drama|yeni|dizi|aile|aksiyon|dram|gerilim|fantastik|bilim|nouve|netflix s[ée]ries|prime video s[ée]ries|disney\+ s[ée]ries|films?\b/i;
-
-function showOther() {
-  return kino.config.get("otherLangs") === true;
-}
-
-function isActive(key) {
-  return activeSources().some((s) => s.key === key);
-}
-
-// ---- 2. cache -------------------------------------------------------------------------------------------------
-
-// kino.storage keeps 256 KB in all. An entry is `{ at, v }`, kept HARD_TTL_MS, "fresh" for the window the caller gives;
-// an expired-but-kept one is the fallback when the bridge fails (an old list beats an empty screen).
-const CACHE_PREFIX = "c1:";
-const HARD_TTL_MS = 24 * 60 * 60 * 1000;
-const ENTRY_MAX_CHARS = 48 * 1024;
-const FRESH_LIST_MS = 15 * 60 * 1000;
-const FRESH_META_MS = 60 * 60 * 1000;
-const FRESH_MANIFEST_MS = 12 * 60 * 60 * 1000;
-
-function cacheKeys() {
-  return kino.storage.keys().filter((k) => k.startsWith(CACHE_PREFIX));
-}
-
-function cacheRead(key) {
-  const raw = kino.storage.get(CACHE_PREFIX + key);
-  if (!raw) return null;
-  try {
-    const e = JSON.parse(raw);
-    return e && typeof e.at === "number" ? e : null;
-  } catch {
-    kino.storage.remove(CACHE_PREFIX + key);
-    return null;
-  }
-}
-
-function evictOldest() {
-  let victim = null;
-  let oldest = Infinity;
-  for (const k of cacheKeys()) {
-    let at = 0;
-    try {
-      at = JSON.parse(kino.storage.get(k) || "{}").at || 0;
-    } catch {
-      // unreadable: the first to go
-    }
-    if (at < oldest) {
-      oldest = at;
-      victim = k;
-    }
-  }
-  if (!victim) return false;
-  kino.storage.remove(victim);
-  return true;
-}
-
-// A cache never fails the call it serves: whatever storage refuses is simply not cached.
-function cacheWrite(key, v) {
-  const raw = JSON.stringify({ at: Date.now(), v });
-  if (raw.length > ENTRY_MAX_CHARS) return;
-  for (let tries = 0; tries < 20; tries++) {
-    try {
-      kino.storage.set(CACHE_PREFIX + key, raw, { ttlMs: HARD_TTL_MS });
-      return;
-    } catch (e) {
-      if (!e || e.code !== "too_large" || !evictOldest()) return;
-    }
-  }
-}
-
-async function cached(key, freshMs, load) {
-  const hit = cacheRead(key);
-  if (hit && Date.now() - hit.at < freshMs) return hit.v;
-  try {
-    const v = await load();
-    cacheWrite(key, v);
-    return v;
-  } catch (e) {
-    if (hit) {
-      kino.log("serving stale " + key + ": " + (e && e.message));
-      return hit.v;
-    }
-    throw e;
-  }
-}
-
-// ---- 3. bridge client -----------------------------------------------------------------------------------------
-
-const enc = encodeURIComponent;
-
-const HEALTH_KEY = "health";
-const DOWN_AFTER = 3;
-
-function readHealth() {
-  try {
-    const h = JSON.parse(kino.storage.get(HEALTH_KEY) || "{}");
-    return h && typeof h === "object" && !Array.isArray(h) ? h : {};
-  } catch {
-    return {};
-  }
-}
-
-// Three failed requests in a row are reported once (the third only); an ok answer resets the count.
-function recordHealth(ok) {
-  try {
-    const prev = readHealth();
-    const fails = ok ? 0 : (Number.isFinite(prev.fails) ? prev.fails : 0) + 1;
-    kino.storage.set(HEALTH_KEY, JSON.stringify({ ok, fails, at: Date.now() }));
-    if (fails === DOWN_AFTER) kino.log.report("cncverse:down", "bridge");
-  } catch {
-    // a full storage: the next request records again
-  }
-}
-
-// The bridge's address. By default it is the plugin's own profile: the code in its path is sealed in the manifest
-// (`secrets.bridgeCode`), so the marker stands in for it until kino.fetch sends the request (the code never reaches this file,
-// a log or an error). A person's own address, pasted in the settings, takes its place: `https://cncverse.dpdns.org/u/<code>`,
-// a `stremio://` link and a trailing /manifest.json are tolerated; any other host is refused.
-function base() {
-  let raw = String(kino.config.get("address") || "").trim();
-  if (!raw) {
-    try {
-      return `https://${HOST}/u/${kino.secret("bridgeCode")}`;
-    } catch {
-      // A seal only opens when the plugin is installed from its default branch, without @branch.
-      throw kino.error("auth_required", "the sealed bridge code is not available", { userMessage: t("needAddress") });
-    }
-  }
-  raw = raw.replace(/^stremio:\/\//i, "https://").replace(/\/manifest\.json.*$/i, "").replace(/\/+$/, "");
-  if (!/^https:\/\//i.test(raw)) raw = "https://" + raw.replace(/^https?:\/\//i, "");
-  let u;
-  try {
-    u = new URL(raw);
-  } catch {
-    throw kino.error("invalid_request", "bad bridge address", { userMessage: t("badAddress") });
-  }
-  if (u.hostname.toLowerCase() !== HOST || u.pathname.length < 4) throw kino.error("invalid_request", "bad bridge address", { userMessage: t("badAddress") });
-  return "https://" + HOST + u.pathname.replace(/\/+$/, "");
-}
-
-// [slice]: one of many sources asked at once (a search, a home row): its failure is that source's, not the bridge's, so
-// it is not counted in the health the settings show and the report.
-async function getJson(path, timeoutMs, slice) {
-  const note = (ok) => (slice && !ok ? undefined : recordHealth(ok));
+async function getJson(path, timeoutMs) {
   let r;
   try {
-    r = await kino.fetch(base() + path, { timeoutMs: timeoutMs || 15000, headers: { Accept: "application/json" } });
+    r = await kino.fetch(BASE + path, { timeoutMs: timeoutMs || 12000 });
   } catch (e) {
-    if (e && (e.code === "auth_required" || e.code === "invalid_request")) throw e;
-    note(false);
-    throw e;
+    const code = e && e.code;
+    kino.log("fetch " + route(path) + " failed: " + code);
+    throw kino.error("unavailable", "fetch " + code, { userMessage: t(code === "timeout" ? "timeout" : "network") });
   }
   if (!r.ok) {
-    note(false);
-    throw kino.error("unavailable", "CNCVerse answered " + r.status, { userMessage: t("unavailable") });
+    kino.log("fetch " + route(path) + " answered " + r.status);
+    throw kino.error(r.status === 404 ? "not_found" : "unavailable", "http " + r.status, { userMessage: t("server", { status: r.status }) });
   }
   try {
-    const body = await r.json();
-    recordHealth(true);
-    return body;
+    return r.json();
   } catch {
-    note(false);
-    throw kino.error("unavailable", "CNCVerse answered something that is not JSON", { userMessage: t("unavailable") });
+    kino.log("fetch " + route(path) + " is not json");
+    throw kino.error("unavailable", "not json", { userMessage: t("notStremio") });
   }
 }
 
-// The bridge keeps scraping after the client hangs up (measured: three aborted requests, the fourth answered from what they
-// had gathered). So a request is sent and dropped at once for what the person is likely to open next: by the time they tap,
-// the page or the streams are ready. Never awaited for long and never failing the call it rides on.
-const WARM_TIMEOUT_MS = 1000;
-
-async function warmUp(paths) {
-  const list = paths.filter(Boolean).slice(0, 3);
-  if (!list.length) return;
-  let url;
-  try {
-    url = base();
-  } catch {
-    return;
-  }
-  await Promise.allSettled(list.map((p) => kino.fetch(url + p, { timeoutMs: WARM_TIMEOUT_MS, headers: { Accept: "application/json" } }).catch(() => null)));
-}
-
-// A slow call (a title's page, its streams): when the bridge does not answer in time it is still working, so the person is
-// told to open it again rather than shown a generic failure.
-async function slowJson(path, messageKey, capMs) {
-  try {
-    return await getJson(path, capMs || SLOW_TIMEOUT_MS, true);
-  } catch (e) {
-    // "unavailable", not "timeout": Kino words a timeout itself and would drop this sentence.
-    if (e && (e.code === "timeout" || /took too long/i.test(String(e.message || "")))) {
-      throw kino.error("unavailable", "the bridge is still preparing it", { userMessage: t(messageKey || "warming") });
-    }
-    throw e;
-  }
-}
-
-async function mapLimit(list, limit, fn) {
+/** Runs `fn` over `list` with at most `limit` in flight (kino.fetch allows 6); a failed item answers undefined. */
+async function pool(list, limit, fn) {
   const out = new Array(list.length);
   let next = 0;
-  async function worker() {
+  const worker = async () => {
     while (next < list.length) {
       const i = next++;
-      out[i] = await fn(list[i], i);
+      try { out[i] = await fn(list[i], i); } catch { out[i] = undefined; }
     }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, list.length) }, worker));
+  };
+  const workers = [];
+  for (let w = 0; w < Math.min(limit, list.length); w++) workers.push(worker());
+  await Promise.all(workers);
   return out;
 }
 
-// A catalog's shelves are its `genre` options. The bridge's manifest lists them in some builds and not in others (1.0.3382
-// has them, 1.0.3380 does not) while the filter itself works in both, so the ones measured are kept here and the manifest
-// only fills a catalog this table does not know. A fixed table also keeps a shelf's index in a ref meaning the same thing.
-// Adult shelves are never kept.
-const GENRES = {
-  cnc_JIOTV_tv: ["News", "Infotainment", "Devotional", "Educational", "Entertainment", "Business", "Kids", "Movies", "Shopping", "Sports", "Lifestyle", "Music"],
-  cnc_HDHub4U_other: ["Latest", "Bollywood", "Hollywood", "Hindi Dubbed", "South Hindi Dubbed", "Web Series"],
-  cnc_4KHDHUB_other: ["Home", "Latest Movies", "Latest Episodes", "Korean Series", "Netflix", "Amazon Prime Video", "JioHotstar", "Disney+"],
-  cnc_VegaMovies_other: ["Home", "Netflix", "Disney Plus Hotstar", "Amazon Prime", "MX Original", "Anime Series", "Korean Series"],
-  cnc_Rogmovies_other: ["Home", "Netflix", "Disney Plus Hotstar", "Amazon Prime", "MX Original"],
-  cnc_MultiMovies_other: ["Trending", "Latest Movies", "Latest TV Shows", "Anime Series", "Anime Movies", "Bollywood Movies", "Hollywood Movies", "South Indian Movies"],
-  cnc_Cinefreak_other: ["Home", "Web Series", "Bangla Movies", "Hindi Movies", "English Movies", "Dual Audio", "Bangla Dubbed", "Netflix"],
-  cnc_Movix_other: ["Nouveaux Films", "Nouvelles Séries", "Netflix Films", "Netflix Séries", "Prime Video Films", "Prime Video Séries", "Disney+ Films", "Disney+ Séries"],
-  cnc_Kisskh_other: ["Latest", "Top K-Drama", "Top C-Drama", "Movie Popular", "Movie Last Update", "TVSeries Popular", "TVSeries Last Update", "Anime Popular"],
-  cnc_Dizilla_other: ["Yeni Bölümler", "Yeni Eklenen Diziler", "Aile", "Aksiyon", "Bilim Kurgu", "Dram", "Fantastik", "Gerilim"],
-  cnc_ReANIME_ReAnime_other: ["Trending Now", "Latest Episodes", "Currently Airing", "Most Popular", "Top Rated", "New Releases", "Anime Movies", "Completed Series"],
-};
+// Pages of a catalog stay in memory for the sandbox's life: Home, Ver más and the live tab ask for the same ones.
+const MEM = new Map();
+const TTL_PAGE = 10 * 60 * 1000;
 
-async function genresOf(catalog) {
-  if (GENRES[catalog]) return GENRES[catalog];
-  const all = await cached("genres", FRESH_MANIFEST_MS, async () => {
-    const m = await getJson("/manifest.json", LIST_TIMEOUT_MS, true);
-    const out = {};
-    for (const c of Array.isArray(m.catalogs) ? m.catalogs : []) {
-      const g = (Array.isArray(c.extra) ? c.extra : []).find((e) => e && e.name === "genre");
-      out[c.id] = g && Array.isArray(g.options) ? g.options.filter((o) => typeof o === "string" && o.trim()).map((o) => o.trim().slice(0, 60)) : [];
-    }
-    return out;
-  });
-  return (all[catalog] || []).filter((g) => !ADULT.test(g));
+async function cachedMem(key, ttl, fn) {
+  const hit = MEM.get(key);
+  if (hit && Date.now() - hit.at < ttl) return hit.v;
+  const v = await fn();
+  MEM.set(key, { at: Date.now(), v });
+  return v;
 }
 
-// ---- 4. items -------------------------------------------------------------------------------------------------
+// ---- 3. manifest -------------------------------------------------------------------------------------------------
 
-const MAX_ID = 128;
+const MANIFEST_KEY = "m2";
+const TTL_MANIFEST = 60 * 60 * 1000;
 
-// A Kino item id (^[A-Za-z0-9._~-]{1,128}$) from the bridge's id ("cnc:" + base64): the url-safe alphabet, shortened with a
-// hash when it is too long. The ref keeps the bridge's own id.
-function kinoId(addonId) {
-  const clean = String(addonId || "").replace(/^cnc:/, "").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "").replace(/[^A-Za-z0-9._~-]/g, "-") || "unknown";
-  if (clean.length <= MAX_ID) return clean;
-  return clean.slice(0, MAX_ID - 9) + "-" + kino.crypto.hash("sha1", String(addonId)).slice(0, 8);
-}
-
-// The sites title a release like "Gunaah (Season 1 – 2) Hindi Complete Hotstar Exclusive WEB Series 480p | 720p | 1080p
-// WEB-DL": the title is what comes before the first technical word.
-function cleanTitle(name) {
-  let s = String(name || "").replace(/[⠀​]/g, "").replace(/^[^\p{L}\p{N}(\[]+/u, "");
-  const cut = /\s(?:\d{3,4}p\b|WEB-?DL|WEB-?Rip|Blu-?Ray|BRRip|HDRip|HDTC|HDCAM|Dual Audio|\{|Hindi (?:Dubbed|Complete|TV)|Complete\b)/i.exec(s);
-  if (cut && cut.index > 2) s = s.slice(0, cut.index);
-  return s.replace(/[\s\-–:|]+$/, "").slice(0, 120);
-}
-
-/** The text a bridge id carries ("Source::<url or json>"), from its url-safe or plain base64; "" when it is not base64. */
-function decodeId(addonId) {
-  const b64 = String(addonId || "").replace(/^cnc:/, "").replace(/-/g, "+").replace(/_/g, "/").replace(/=+$/, "");
-  if (!/^[A-Za-z0-9+/]+$/.test(b64)) return "";
-  const bytes = [];
-  let acc = 0;
-  let bits = 0;
-  for (const ch of b64) {
-    acc = (acc << 6) | B64.indexOf(ch);
-    bits += 6;
-    if (bits >= 8) {
-      bits -= 8;
-      bytes.push((acc >> bits) & 255);
-    }
-  }
-  try {
-    return decodeURIComponent(bytes.map((b) => "%" + (b < 16 ? "0" : "") + b.toString(16)).join(""));
-  } catch {
-    return bytes.map((b) => String.fromCharCode(b)).join("");
-  }
-}
-const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-/** The source an id comes from: its text starts "Source::". */
-function sourceNameOf(addonId) {
-  const i = decodeId(addonId).indexOf("::");
-  return i > 0 ? decodeId(addonId).slice(0, i).slice(0, 40) : "";
-}
-
-// ---- 4b. which sources have been failing ------------------------------------------------------------------------
-
-// Some sources answer a title's page or streams in 5 s and others never (HDHub4U's often takes 35 s and ends empty). A
-// failure is remembered per source for a while: the source goes to the end of a search's results and a title from it
-// says so in its message. A success clears it.
-const FAIL_KEY = "srcfail";
-const FAIL_FOR_MS = 6 * 60 * 60 * 1000;
-const FAIL_LIMIT = 2;
-
-function readFails() {
-  try {
-    const raw = JSON.parse(kino.storage.get(FAIL_KEY) || "{}");
-    const now = Date.now();
-    const out = {};
-    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-      for (const [k, v] of Object.entries(raw)) if (v && Number(v.until) > now && Number.isFinite(v.n)) out[k] = { n: v.n, until: Number(v.until) };
-    }
-    return out;
-  } catch {
-    return {};
-  }
-}
-
-function sourceKey(x) {
-  return String(x || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
-}
-
-function noteSource(name, ok) {
-  name = sourceKey(name);
-  if (!name) return;
-  try {
-    const fails = readFails();
-    if (ok) delete fails[name];
-    else fails[name] = { n: ((fails[name] && fails[name].n) || 0) + 1, until: Date.now() + FAIL_FOR_MS };
-    kino.storage.set(FAIL_KEY, JSON.stringify(fails), { ttlMs: FAIL_FOR_MS });
-  } catch {
-    // a full storage: the order just is not learned this time
-  }
-}
-
-// How long each source took to answer a search, smoothed: the next search asks the quick ones first.
-const LAT_KEY = "srclat2";
-
-function readLatency() {
-  try {
-    const raw = JSON.parse(kino.storage.get(LAT_KEY) || "{}");
-    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
-  } catch {
-    return {};
-  }
-}
-
-function noteLatency(key, ms) {
-  try {
-    const all = readLatency();
-    const prev = Number(all[key]);
-    all[key] = Math.round(Number.isFinite(prev) && prev > 0 ? prev * 0.6 + ms * 0.4 : ms);
-    kino.storage.set(LAT_KEY, JSON.stringify(all), { ttlMs: 7 * 24 * 60 * 60 * 1000 });
-  } catch {
-    // a full storage: the order just is not learned this time
-  }
-}
-
-const SERIES_WORDS = /\bseason\b|\bS\d{1,2}\b|\bS\d{1,2}E\d|\bseries\b|\btv[- ]?show\b|\bepisode|\bepisodes\b|\bs[ée]ries\b|\bdizi\b|\bseasons\b/i;
-const MOVIE_WORDS = /\bmovie\b|\bfilms?\b|\bfull movie\b/i;
-
-// A title's kind: its shelf's label when it names one, else the path of the page it comes from ("/series/", "/movie/"),
-// else its name, else its source's usual kind.
-function kindOf(name, shelfKind, source, addonId) {
-  if (shelfKind) return shelfKind;
-  const page = decodeId(addonId);
-  if (/\/(?:series|tv-?series|tv-?shows?|web-?series|shows?|dizi|diziler|anime-series|episodes?)\//i.test(page) || /[-_]series[-_]\d/i.test(page)) return "series";
-  if (/\/(?:movies?|films?|film)\//i.test(page)) return "movie";
-  if (SERIES_WORDS.test(name)) return "series";
-  if (MOVIE_WORDS.test(name)) return "movie";
-  return source.kind;
-}
-
-function shelfKindOf(label) {
-  const s = String(label || "");
-  if (/movie|film|cinema|bioskop/i.test(s) && !/series|show|s[ée]rie/i.test(s)) return "movie";
-  if (/series|show|episod|s[ée]rie|dizi|bölüm|drama|k-?drama|c-?drama|tv/i.test(s)) return "series";
-  return null;
-}
-
-function toItem(m, source, shelfKind) {
-  const title = cleanTitle(m && m.name);
-  if (!m || typeof m.id !== "string" || !m.id.startsWith("cnc:") || title.length < 2) return null;
-  const kind = kindOf(String(m.name || ""), shelfKind, source, m.id);
-  const item = { id: kinoId(m.id), ref: (kind === "movie" ? "m:" : "i:") + m.id + "|" + title.slice(0, 120), title, kind };
-  if (typeof m.poster === "string" && m.poster.startsWith("https://")) item.poster = m.poster;
-  item.badges = [source.title.slice(0, 20)];
-  const year = /\((19|20)\d{2}\)/.exec(String(m.name || ""));
-  if (year) item.year = year[0].slice(1, 5);
-  return item;
-}
-
-function itemsOf(body, source, shelfKind) {
-  const seen = new Set();
-  const out = [];
-  for (const m of body && Array.isArray(body.metas) ? body.metas : []) {
-    const it = toItem(m, source, shelfKind);
-    if (it && !seen.has(it.id)) {
-      seen.add(it.id);
-      out.push(it);
-    }
-  }
-  return out;
-}
-
-function sourceOf(key) {
-  return SOURCES.concat(HIGHLIGHTS).find((s) => s.key === key);
-}
-
-// A shelf: a source's catalog, optionally one genre, from `skip`.
-async function shelfItems(source, genreIndex, skip, slice) {
-  let genre = "";
-  if (genreIndex > 0) genre = (await genresOf(source.catalog))[genreIndex - 1] || "";
-  if (genre && !showOther() && OTHER_SHELF.test(genre) && !/^(latest movies|hollywood|english movies|dual audio)$/i.test(genre)) return { items: [], genre };
-  const extra = [genre ? "genre=" + enc(genre) : "", skip > 0 ? "skip=" + skip : ""].filter(Boolean).join("&");
-  const body = await getJson(`/catalog/${source.type || "other"}/${source.catalog}${extra ? "/" + extra : ""}.json`, LIST_TIMEOUT_MS, slice);
-  return { items: itemsOf(body, source, shelfKindOf(genre)), genre };
-}
-
-// ---- 5. search ------------------------------------------------------------------------------------------------
-
-// Every searchable source at once, a few at a time; one that is slow or fails is left out. ORDERED (never filtered) by how
-// much each title resembles what was typed.
-export async function search(query) {
-  const q = kino.rank.shortQuery(String(query.q || "").trim());
-  if (!q) return [];
-  base();
-  // Inside a "Ver más" page (capability scopedSearch): only that source. Any other page: null, Kino filters it itself.
-  const main = String(kino.config.get("searchIn") || "all") === "main" ? HOME_SOURCES : null;
-  let sources = activeSources().filter((x) => !main || main.includes(x.key));
-  if (query.within) {
-    const w = /^c:([a-z0-9]+):\d{1,3}$/.exec(String(query.within));
-    const only = w && sourceOf(w[1]);
-    if (!only) return null;
-    sources = [only];
-  }
-  const titles = [query.q, query.originalTitle].concat(Array.isArray(query.altTitles) ? query.altTitles : []).filter((x) => typeof x === "string" && x.trim());
-  // Kino cuts a search at 15 s, and the bridge answers searches one at a time (measured: six at once and every source slowed
-  // to the sum, all of them missing the cut). So the sources go one after another, the quickest first (latency is
-  // remembered; the first time a measured order is used), inside one budget; whatever has answered by then is the result.
-  // When Kino asks for one specific title (it sends a year or a TMDB id), an exact match ends the round early.
-  const startedAt = Date.now();
-  const lat = readLatency();
-  const ordered = sources.slice().sort((x, y) => (lat[x.key] || LATENCY_SEED_MS[x.key] || LATENCY_UNKNOWN_MS) - (lat[y.key] || LATENCY_SEED_MS[y.key] || LATENCY_UNKNOWN_MS));
-  const wantExact = (query.year > 0 || query.tmdbId > 0) && !query.within;
-  const flat = (x) => String(x || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
-  const targets = titles.map(flat).filter(Boolean);
-  const results = new Map();
-  let done = false;
-  async function ask(s, cap) {
-    const left = SEARCH_BUDGET_MS - (Date.now() - startedAt);
-    if (left < 1500) return null;
-    const t0 = Date.now();
-    try {
-      const body = await getJson(`/catalog/${s.type || "other"}/${s.catalog}/search=${enc(q)}.json`, Math.min(cap, left), true);
-      noteLatency(s.key, Date.now() - t0);
-      const items = itemsOf(body, s, null);
-      kino.log(`search ${s.key}: ${items.length} in ${Date.now() - t0} ms`);
-      return items;
-    } catch (e) {
-      if (e && (e.code === "auth_required" || e.code === "invalid_request")) throw e;
-      noteLatency(s.key, cap * 2);
-      kino.log(`search ${s.key} failed after ${Date.now() - t0} ms: ` + (e && e.message));
-      return null;
-    }
-  }
-  // Two passes: a short wait per source first, so one that hangs cannot spend the budget; then the ones that did not answer
-  // get what is left (the bridge went on scraping after the first try hung up, so the second often answers at once).
-  const retry = [];
-  for (const s of ordered) {
-    if (done) break;
-    const items = await ask(s, SEARCH_FIRST_PASS_MS);
-    if (items === null) {
-      retry.push(s);
-      continue;
-    }
-    results.set(s.key, items);
-    if (wantExact && items.some((it) => targets.includes(flat(it.title)))) done = true;
-  }
-  for (const s of retry) {
-    if (done) break;
-    const items = await ask(s, SEARCH_SOURCE_TIMEOUT_MS);
-    if (items === null) continue;
-    results.set(s.key, items);
-    if (wantExact && items.some((it) => targets.includes(flat(it.title)))) done = true;
-  }
-  // Not one source answered: the bridge itself is down or hung. Say so, instead of an empty list that reads "not found".
-  if (results.size === 0 && retry.length > 0) {
-    throw kino.error("unavailable", "no source answered the search", { userMessage: t("unavailable") });
-  }
-  const lists = ordered.map((s) => results.get(s.key) || []);
-  const merged = [];
-  const fails = readFails();
-  const bad = (i) => ((fails[sourceKey(ordered[i].title)] && fails[sourceKey(ordered[i].title)].n) || 0) >= FAIL_LIMIT;
-  const order = lists.map((_, i) => i).sort((a, b) => (bad(a) ? 1 : 0) - (bad(b) ? 1 : 0) || a - b);
-  const longest = Math.max(0, ...lists.map((l) => l.length));
-  for (let i = 0; i < longest; i++) for (const k of order) if (lists[k][i]) merged.push(lists[k][i]);
-  const seen = new Set();
-  const unique = merged.filter((it) => {
-    const key = it.title.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-  const ranked = kino.rank.sortBySimilarity(unique, titles);
-  // The first series are the ones tapped next, and their page is the slow part (a long anime, a scraped pack).
-  if (Date.now() - startedAt < 11000) {
-    await warmUp(ranked.filter((x) => x.ref.startsWith("i:")).slice(0, 3).map((x) => `/meta/other/${enc(idOf(x.ref, "i:"))}.json`));
-  }
-  return ranked;
-}
-
-// ---- 6. home, browse, categories ------------------------------------------------------------------------------
-
-function genreOfSource(source) {
-  if (source.catalog.includes("Highlights")) return "deportes";
-  return source.kind === "series" ? "series" : "peliculas";
-}
-
-async function homeRow(key) {
-  const source = sourceOf(key);
-  if (!source) return null;
-  try {
-    const items = await cached("row:" + key, FRESH_LIST_MS, async () => (await shelfItems(source, 0, 0, true)).items.slice(0, ROW_MAX));
-    return items.length ? { id: "src-" + key, title: source.title, ref: `c:${key}:0`, items, genre: genreOfSource(source) } : null;
-  } catch (e) {
-    if (e && (e.code === "auth_required" || e.code === "invalid_request")) throw e;
-    kino.log("row " + key + " failed: " + (e && e.message));
-    return null;
-  }
-}
-
-export async function home() {
-  if (kino.config.get("homeRows") === false) return [];
-  base();
-  return (await mapLimit(HOME_SOURCES.filter(isActive), 3, homeRow)).filter(Boolean);
-}
-
-// ref "c:<source>:<genre index>" (0 = the catalog's own front shelf), paged by the bridge's `skip`.
-export async function browse(ref, cursor) {
-  const m = /^c:([a-z0-9]+):(\d{1,3})$/.exec(String(ref || ""));
-  const source = m && sourceOf(m[1]);
-  if (!m || !source) throw kino.error("not_found", "unknown browse ref: " + String(ref).slice(0, 60));
-  const skip = Math.min(MAX_SKIP, Math.max(0, parseInt(cursor || "0", 10) || 0));
-  const { items } = await shelfItems(source, parseInt(m[2], 10), skip);
-  const page = items.slice(0, PAGE_MAX);
-  // `skip` counts the items already read, whatever size the bridge's pages have.
-  return items.length && skip + items.length < MAX_SKIP ? { items: page, next: String(skip + items.length) } : { items: page };
-}
-
-// Categorías: one tile per source (at most 24); the art is the first title's poster.
-export async function categories() {
-  const tiles = activeSources().map((s) => ({ id: s.key, title: s.title, ref: `c:${s.key}:0`, source: s })).concat(
-    HIGHLIGHTS.map((s) => ({ id: s.key, title: t("tileHighlights", { name: s.title }), ref: `c:${s.key}:0`, source: s })),
-  );
-  return (await mapLimit(tiles, 4, async (tile) => {
-    let art = "";
-    try {
-      art = await cached("art:" + tile.id, 12 * 60 * 60 * 1000, async () => {
-        const first = (await shelfItems(tile.source, 0, 0, true)).items.find((x) => x.poster);
-        return first ? first.poster : "";
-      });
-    } catch (e) {
-      if (e && (e.code === "auth_required" || e.code === "invalid_request")) throw e;
-      kino.log("art " + tile.id + " failed: " + (e && e.message));
-    }
-    const out = { id: tile.id, title: tile.title, ref: tile.ref };
-    if (art) out.art = art;
-    return out;
-  }));
-}
-
-// The plugin's own section (a chip on the phone's Inicio, an entry in the TV's sidebar): the latest, movies, series and
-// the sports replays, one row per source.
-export async function section({ tab }) {
-  const tabs = [
-    { id: "start", label: t("tabStart") },
-    { id: "movies", label: t("tabMovies") },
-    { id: "series", label: t("tabSeries") },
-    { id: "highlights", label: t("tabHighlights") },
-  ];
-  const tabId = tabs.some((x) => x.id === tab) ? tab : tabs[0].id;
-  const keys = { start: HOME_SOURCES, movies: SECTION_MOVIES, series: SECTION_SERIES, highlights: HIGHLIGHTS.map((h) => h.key) }[tabId].filter((k) => k.startsWith("hl") || isActive(k));
-  base();
-  const rows = (await mapLimit(keys, 3, homeRow)).filter(Boolean);
-  const answer = { tabs, tab: tabId, rows };
-  const pool = rows.length ? rows[0].items.filter((x) => x.poster) : [];
-  if (pool.length) {
-    // Today's pick: the same all day, a different one tomorrow.
-    const pick = pool[Math.floor(Date.now() / 86400000) % pool.length];
-    answer.hero = { title: pick.title, text: t("sectionHero"), image: pick.poster };
-  }
-  return answer;
-}
-
-// ---- 7. episodes and details ----------------------------------------------------------------------------------
-
-// A ref is "<kind>:<bridge id>" with the title after a "|" ("m:cnc:…|Youth"): ids are base64 and never hold one. The title is
-// what lets a failing source be replaced by the same title in another (section 8c).
-function splitRef(ref) {
-  const s = String(ref || "");
-  const i = s.indexOf("|");
-  return i < 0 ? { head: s, title: "" } : { head: s.slice(0, i), title: s.slice(i + 1).slice(0, 160) };
-}
-
-function idOf(ref, prefix) {
-  const s = splitRef(ref).head;
-  return s.startsWith(prefix) && s.length > prefix.length ? s.slice(prefix.length) : null;
-}
-
-function titleOf(ref) {
-  return splitRef(ref).title;
-}
-
-async function metaOf(id) {
-  return cached("meta:" + kinoId(id), FRESH_META_MS, async () => {
-    const body = await slowJson(`/meta/other/${enc(id)}.json`);
-    const m = body && body.meta;
-    if (!m || typeof m !== "object") throw kino.error("not_found", "no meta");
-    return {
-      title: cleanTitle(m.name),
-      poster: typeof m.poster === "string" && m.poster.startsWith("https://") ? m.poster : "",
-      backdrop: typeof m.background === "string" && m.background.startsWith("https://") ? m.background : "",
-      overview: String(m.description || "").slice(0, 2000),
-      genres: (Array.isArray(m.genres) ? m.genres : []).filter((g) => typeof g === "string").slice(0, 5),
-      year: /^(19|20)\d{2}/.test(String(m.year || m.releaseInfo || "")) ? String(m.year || m.releaseInfo).slice(0, 4) : "",
-      rating: parseFloat(m.imdbRating) || 0,
-      // [id, season, number, title, thumbnail]
-      videos: (Array.isArray(m.videos) ? m.videos : [])
-        .filter((v) => v && typeof v.id === "string" && v.id.startsWith("cnc:"))
-        .slice(0, 5000)
-        .map((v) => [v.id, Math.max(0, parseInt(v.season, 10) || 0), Math.max(1, parseInt(v.episode, 10) || 1), String(v.title || "").slice(0, 120), typeof v.thumbnail === "string" && v.thumbnail.startsWith("https://") ? v.thumbnail : ""]),
-    };
-  });
-}
-
-// The bridge's ids are its own, so the title is looked up in Kino's TMDB (exact title and year, never a guess) to give the
-// page the IMDb/TMDB ids the online subtitle search and the library match on. A title Kino does not know just has none.
-async function idsOf(meta, series) {
-  if (typeof kino.meta !== "function" || !meta.title) return null;
-  try {
-    const key = "ids:" + (series ? "s:" : "m:") + meta.title.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "").slice(0, 60) + ":" + (meta.year || "");
-    return await cached(key, 7 * 24 * 60 * 60 * 1000, async () => {
-      const q = { type: series ? "series" : "movie", title: meta.title, lang: kino.lang };
-      if (/^(19|20)\d{2}$/.test(String(meta.year))) q.year = parseInt(meta.year, 10);
-      const m = await kino.meta(q);
-      const ids = m && m.ids ? m.ids : {};
-      const out = {};
-      if (typeof ids.imdb === "string" && /^tt\d{5,10}$/.test(ids.imdb)) out.imdb = ids.imdb;
-      if (Number.isInteger(ids.tmdb)) out.tmdb = ids.tmdb;
-      return Object.keys(out).length ? out : null;
+function normalizeManifest(m) {
+  if (!m || typeof m !== "object" || !Array.isArray(m.catalogs)) throw kino.error("unavailable", "no catalogs", { userMessage: t("notStremio") });
+  const resources = (m.resources || []).map((r) => (typeof r === "string" ? r : r && r.name)).filter(Boolean);
+  const catalogs = [];
+  for (const c of m.catalogs) {
+    if (!c || !c.id || !c.type) continue;
+    const extra = Array.isArray(c.extra) ? c.extra : [];
+    const required = extra.filter((e) => e && e.isRequired).map((e) => e.name);
+    const genreExtra = extra.find((e) => e && e.name === "genre");
+    const genres = Array.isArray(genreExtra && genreExtra.options)
+      ? genreExtra.options.filter((o) => typeof o === "string" && o.trim()).map((o) => o.trim().slice(0, 60)).slice(0, 24)
+      : [];
+    catalogs.push({
+      id: String(c.id),
+      type: String(c.type),
+      name: String(c.name || c.id),
+      search: extra.some((e) => e && e.name === "search"),
+      genres,
+      // A catalog that only answers with a required filter (a search-only one, say) cannot fill a row.
+      browsable: required.length === 0,
     });
-  } catch (e) {
-    kino.log("ids failed: " + (e && e.message));
-    return null;
   }
+  return { resources, catalogs };
 }
 
-function infoOf(meta) {
-  const info = {};
-  if (meta.title) info.title = meta.title;
-  if (meta.poster) info.poster = meta.poster;
-  if (meta.backdrop) info.backdrop = meta.backdrop;
-  if (meta.overview) info.overview = meta.overview;
-  if (meta.genres.length) info.genres = meta.genres;
-  if (meta.year) info.year = meta.year;
-  if (meta.ids) info.ids = meta.ids;
-  return info;
-}
-
-// Seasons, then numbers. A title the shelf took for a series that has no episode list (a film) comes back as one episode
-// that plays it.
-export async function episodes(ref) {
-  const id = idOf(ref, "i:");
-  if (!id) throw kino.error("not_found", "not a series ref: " + String(ref).slice(0, 80));
-  const listed = titleOf(ref);
-  const tag = (vid, title) => "e:" + vid + (title ? "|" + title.slice(0, 120) : "");
-  let meta;
+async function loadManifest(fresh) {
+  let stale = null;
   try {
-    meta = await metaOf(id);
+    const raw = kino.storage.get(MANIFEST_KEY);
+    if (raw) stale = JSON.parse(raw);
+  } catch { /* unreadable: refetch */ }
+  if (!fresh && stale && Date.now() - stale.at < TTL_MANIFEST) return stale.v;
+  try {
+    const v = normalizeManifest(await getJson("/manifest.json", 15000));
+    try { kino.storage.set(MANIFEST_KEY, JSON.stringify({ at: Date.now(), v })); } catch { /* storage full: not cached */ }
+    return v;
   } catch (e) {
-    // The bridge is still scraping the page. Rather than a dead end, the title plays as one entry: its own streams (a pack's
-    // files come together in them). The page is warming, so the next time the full list is there.
-    if (e && e.code === "unavailable") {
-      noteSource(sourceNameOf(id), false);
-      return { series: {}, episodes: [{ season: 1, number: 1, ref: tag(id, listed), title: t("watchNow") }] };
-    }
+    if (stale && !fresh) return stale.v; // the server hiccuped: the last manifest still works
     throw e;
   }
-  noteSource(sourceNameOf(id), true);
-  const ids = await idsOf(meta, true);
-  if (ids) meta.ids = ids;
-  if (meta.videos.length) {
-    const first = meta.videos.slice().sort((a, b) => a[1] - b[1] || a[2] - b[2])[0];
-    await warmUp([`/stream/other/${enc(first[0])}.json`]);
-  }
-  if (!meta.videos.length) return { series: infoOf(meta), episodes: [{ season: 1, number: 1, ref: tag(id, listed || meta.title), title: meta.title || t("episode", { n: 1 }) }] };
-  const seen = new Set();
-  const eps = [];
-  for (const [vid, season, number, title, still] of meta.videos.slice().sort((a, b) => a[1] - b[1] || a[2] - b[2])) {
-    const key = season + ":" + number;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const ep = { season: season || 1, number, ref: tag(vid, listed || meta.title) };
-    if (title) ep.title = title;
-    if (still) ep.still = still;
-    eps.push(ep);
-  }
-  return { series: infoOf(meta), episodes: eps };
 }
 
-export async function details(ref) {
-  const movie = idOf(ref, "m:");
-  const id = movie || idOf(ref, "i:");
-  if (!id) return null;
+function isLiveType(type) {
+  return type === "tv" || type === "channel";
+}
+
+const VISUAL = /[\u{1F000}-\u{1FFFF}☀-➿️‍]/gu;
+const BLANK = /^[\s⠀​-‍﻿]*$/;
+
+/** The catalog's name without decoration and without a trailing "(type)" that only repeats the catalog's type. */
+function catalogTitle(cat) {
+  let name = cat.name.replace(VISUAL, "").replace(/\s+/g, " ").trim();
+  const m = /\s*\(([^)]+)\)$/.exec(name);
+  if (m && m[1].toLowerCase() === cat.type.toLowerCase()) name = name.slice(0, m.index).trim();
+  return (name || cat.id).slice(0, 100);
+}
+
+// ---- 4. memory ---------------------------------------------------------------------------------------------------
+
+// Catalog cards often come without a title (or without saying movie or series). Asking the server for each card's page
+// is slow, so what it answered is remembered: next time the card comes out complete. Compact on purpose (256 KB shared).
+const KINDS_KEY = "k1";
+const MAX_KINDS = 1500;
+const TTL_KINDS = 30 * 24 * 60 * 60 * 1000;
+let KINDS = null;
+let KINDS_DIRTY = false;
+
+function kinds() {
+  if (!KINDS) {
+    try { KINDS = JSON.parse(kino.storage.get(KINDS_KEY) || "{}"); } catch { KINDS = {}; }
+    if (!KINDS || typeof KINDS !== "object") KINDS = {};
+  }
+  return KINDS;
+}
+
+function remember(key, name, isSeries, year) {
+  const k = kinds();
+  delete k[key];
+  k[key] = [String(name || "").slice(0, 120), isSeries ? 1 : 0, Number(year) || 0];
+  KINDS_DIRTY = true;
+}
+
+function flushKinds() {
+  if (!KINDS_DIRTY) return;
+  const k = kinds();
+  const keys = Object.keys(k);
+  for (let i = 0; i < keys.length - MAX_KINDS; i++) delete k[keys[i]];
+  try { kino.storage.set(KINDS_KEY, JSON.stringify(k), { ttlMs: TTL_KINDS }); } catch { /* storage full: not cached */ }
+  KINDS_DIRTY = false;
+}
+
+// ---- 5. items ----------------------------------------------------------------------------------------------------
+
+function hash(s) {
+  let a = 0x811c9dc5;
+  let b = 5381;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    a = Math.imul(a ^ c, 16777619) >>> 0;
+    b = (Math.imul(b, 33) + c) >>> 0;
+  }
+  return a.toString(16).padStart(8, "0") + b.toString(16).padStart(8, "0");
+}
+
+function safeId(raw) {
+  return String(raw).replace(/[^A-Za-z0-9._~-]/g, "-").slice(0, 120) || "x";
+}
+
+/** A ref is JSON: { t: Stremio type, i: Stremio id, c: catalog id and n: name, for a live channel only }. */
+function makeRef(t_, i, extra) {
+  return JSON.stringify(Object.assign({ t: t_, i }, extra || {}));
+}
+
+function parseRef(ref) {
   try {
-    const meta = await metaOf(id);
-    const ids = await idsOf(meta, !movie);
-    if (ids) meta.ids = ids;
-    return infoOf(meta);
-  } catch (e) {
-    kino.log("details failed: " + (e && e.message));
-    return null;
-  }
+    const r = JSON.parse(String(ref));
+    if (r && typeof r.t === "string" && (typeof r.i === "string" || (r.c && r.n))) return r;
+  } catch { /* falls through */ }
+  throw kino.error("not_found", "bad ref", { userMessage: t("unknownRef") });
 }
 
-// ---- 8. resolve: copies ---------------------------------------------------------------------------------------
-
-// The bridge already resolves the file lockers: its links are direct files (mkv/mp4 on r2, cocktail.beer, pixeldrain...)
-// and HLS. Measured: the ones named "[Download]" on `*.workers.dev` are HTML pages and cannot play.
-function hostOf(url) {
-  try {
-    return new URL(url).hostname.toLowerCase();
-  } catch {
-    return "";
-  }
+function httpUrl(v) {
+  return typeof v === "string" && /^https?:\/\//.test(v) && v.length <= 2048 ? v : undefined;
 }
 
-function playable(s) {
-  if (!s || typeof s.url !== "string" || !/^https?:\/\//.test(s.url)) return false; // the "support the project" row has no url
-  const h = hostOf(s.url);
-  if (!h) return false;
-  if (/\.workers\.dev$/.test(h) && /\[Download\]/i.test(String(s.title || ""))) return false;
-  return true;
+function num(v) {
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) ? n : 0;
 }
 
-// Lower plays first: a direct file, then HLS, then anything else (the setting `prefer` swaps the first two); a plain-http
-// link (the bridge's own DASH proxy on an IP) goes after every https one.
-function tierOf(url) {
-  if (/^http:\/\//i.test(url)) return 3;
-  const hlsFirst = String(kino.config.get("prefer") || "file") === "hls";
-  if (/\.m3u8(\?|$)/i.test(url)) return hlsFirst ? 0 : 1;
-  if (/\.(mkv|mp4|webm)(\?|$)/i.test(url) || /pixeldrain|\.r2\.cloudflarestorage\.com|cocktail\.beer|valentine\.guru/i.test(hostOf(url) + url)) return hlsFirst ? 1 : 0;
-  return 2;
+function year(meta) {
+  return num(meta.year) || num(String(meta.releaseInfo || "").slice(0, 4)) || 0;
 }
 
-function lineOf(title, emoji) {
-  const l = String(title || "").split("\n").find((x) => x.startsWith(emoji));
-  return l ? l.slice(emoji.length).trim() : "";
+function ratingOf(meta) {
+  const r = parseFloat(meta.imdbRating);
+  return r >= 0 && r <= 10 ? r : undefined;
 }
 
-function describe(s) {
-  const name = String(s.name || "");
-  const title = String(s.title || "");
-  const q = /(2160|1440|1080|720|480|360)p/i.exec(name + " " + lineOf(title, "🎞️")) || (/\b4k\b/i.test(name) ? [null, "2160"] : null);
-  const quality = q ? parseInt(q[1], 10) : 0;
-  const size = /(\d+(?:\.\d+)?)\s*(GB|MB)\b/i.exec(lineOf(title, "💾"));
-  const gb = size ? parseFloat(size[1]) / (size[2].toUpperCase() === "MB" ? 1024 : 1) : 0;
-  // "Source: HDhub4u • HubDrive HubCloud [FSL Server]" -> the bracketed server name when there is one
-  const src = lineOf(title, "🛰️").replace(/^Source:\s*/i, "");
-  const br = /\[([^\]]{2,24})\]/.exec(src);
-  const server = (br ? br[1] : src.split("•").pop()).replace(/^[^\p{L}\p{N}]+/u, "").trim().slice(0, 24);
-  return { quality, gb, server };
+function genresOf(meta) {
+  const g = Array.isArray(meta.genres) ? meta.genres : [];
+  const out = g.filter((x) => typeof x === "string" && x.trim()).map((x) => x.trim().slice(0, 30)).slice(0, 5);
+  return out.length ? out : undefined;
 }
 
-function qualityName(q) {
-  return q >= 2160 ? "4K" : q ? q + "p" : "";
+/** What a Stremio meta says about the title's ids. The imdb id also hides in metahub logos, a common Stremio habit. */
+function idsOf(meta) {
+  const ids = {};
+  const imdb = [meta.imdb_id, meta.id, (/\/(tt\d{5,10})\//.exec(String(meta.logo || "")) || [])[1]].find((x) => /^tt\d{5,10}$/.test(String(x || "")));
+  if (imdb) ids.imdb = imdb;
+  const tmdb = num(meta.moviedb_id || meta.tmdb_id);
+  if (tmdb > 0) ids.tmdb = tmdb;
+  return Object.keys(ids).length ? ids : undefined;
 }
 
-function qualityRank(q, pref) {
-  if (pref === "max") return -q;
-  const cap = pref === "720" ? 720 : 1080;
-  const v = q || cap;
-  return v <= cap ? cap - v : 100000 + (v - cap);
+function seriesInfo(meta) {
+  const runtime = num(meta.runtime);
+  return {
+    title: meta.name ? String(meta.name).slice(0, 200) : undefined,
+    poster: httpUrl(meta.poster),
+    backdrop: httpUrl(meta.background),
+    overview: meta.description ? String(meta.description) : undefined,
+    genres: genresOf(meta),
+    year: year(meta) || undefined,
+    rating: ratingOf(meta),
+    ids: idsOf(meta),
+    runtimeMinutes: runtime >= 1 && runtime <= 1000 ? runtime : undefined,
+  };
 }
 
-function headersOf(s) {
-  const req = s.behaviorHints && s.behaviorHints.proxyHeaders && s.behaviorHints.proxyHeaders.request;
-  const out = {};
-  if (req && typeof req === "object") for (const k of ["Referer", "Origin", "User-Agent"]) if (typeof req[k] === "string" && req[k]) out[k] = req[k];
-  return out;
+// ---- 6. catalogs -------------------------------------------------------------------------------------------------
+
+const PAGE = 100; // Stremio's page size for `skip`
+const DEADLINE_MS = 9000;
+const ENRICH_BUDGET = 24;
+
+function catalogPath(cat, extras) {
+  const e = extras ? "/" + extras : "";
+  return `/catalog/${enc(cat.type)}/${enc(cat.id)}${e}.json`;
 }
 
-function mimeOf(url) {
-  if (/\.m3u8(\?|$)/i.test(url)) return "application/vnd.apple.mpegurl";
-  if (/\.mpd(\?|$)/i.test(url)) return "application/dash+xml";
+/** Stremio's extra properties as a path segment: `genre=Action&skip=100`. */
+function extrasOf(o) {
+  const parts = [];
+  if (o.genre) parts.push("genre=" + enc(o.genre));
+  if (o.search) parts.push("search=" + enc(o.search));
+  if (o.skip) parts.push("skip=" + o.skip);
+  return parts.join("&");
+}
+
+const ADULT = /\b(adult|18\s?\+|xxx|porn|erotic|hentai)\b/i;
+
+function adultName(name) {
+  return ADULT.test(String(name || ""));
+}
+
+/** The best resolution a title's name mentions ("4K", "1080p", "720p", "480p"), for the card's quality chip. */
+function qualityOf(text) {
+  const s = String(text || "");
+  if (/\b(2160p|4k)\b/i.test(s)) return "4K";
+  for (const q of ["1080p", "720p", "480p"]) if (s.toLowerCase().includes(q)) return q;
   return undefined;
 }
 
-function fileKey(url) {
-  const path = url.split("?")[0];
-  return hostOf(url) + ":" + path.slice(path.lastIndexOf("/") + 1).slice(0, 40);
+async function catalogMetas(cat, extras, timeoutMs) {
+  const path = catalogPath(cat, extras);
+  const data = await cachedMem(path, TTL_PAGE, () => getJson(path, timeoutMs || 12000));
+  return Array.isArray(data && data.metas) ? data.metas.filter((m) => m && typeof m.id === "string") : [];
 }
 
-// The bridge lists subtitles with ISO 639-2 codes ("eng"); Kino takes the short code. Only https links are kept: the bridge's
-// own subtitle proxy is plain http on an IP, which Kino refuses, so those are left out rather than sent to be dropped.
-const LANG2 = { eng: "en", spa: "es", ara: "ar", ind: "id", hin: "hi", fre: "fr", fra: "fr", por: "pt", rus: "ru", tur: "tr", kor: "ko", jpn: "ja", zho: "zh", chi: "zh", ben: "bn", tam: "ta", tel: "te", vie: "vi", tha: "th", may: "ms", msa: "ms", ita: "it", ger: "de", deu: "de" };
+/** One catalog card, before it is a Kino item: the server's meta plus what was remembered about its title. */
+function card(m, cat) {
+  const type = String(m.type || cat.type);
+  const key = "n" + hash(m.id);
+  const known = kinds()[key];
+  const name = !BLANK.test(String(m.name || "")) ? String(m.name) : known ? known[0] : "";
+  return { m, type, key, name, series: known ? known[1] === 1 : undefined, overview: undefined, genres: undefined };
+}
 
-function subtitlesOf(s) {
-  const out = [];
+function needsMeta(c) {
+  if (!c.name) return 2;
+  if (c.type !== "movie" && c.type !== "series" && c.series === undefined) return 1;
+  return 0;
+}
+
+/** Fills blank titles first, then unknown kinds, asking the server for each card's page (bounded in number and time). */
+async function enrich(cards, budget, deadline) {
+  const todo = cards.filter(needsMeta).sort((a, b) => needsMeta(b) - needsMeta(a)).slice(0, budget);
+  await pool(todo, 5, async (c) => {
+    if (Date.now() > deadline) return;
+    const meta = (await getJson(`/meta/${enc(c.type)}/${enc(c.m.id)}.json`, 8000)).meta;
+    if (!meta) return;
+    const isSeries = Array.isArray(meta.videos) && meta.videos.length > 0;
+    if (!c.name && !BLANK.test(String(meta.name || ""))) c.name = String(meta.name);
+    c.series = isSeries;
+    c.overview = meta.description ? String(meta.description) : undefined;
+    c.genres = genresOf(meta);
+    remember(c.key, c.name, isSeries, year(meta));
+  });
+}
+
+function toItem(c) {
+  if (!c.name) return null; // no title even after asking: a blank card helps nobody
+  const m = c.m;
+  const kind = c.type === "movie" ? "movie" : c.type === "series" ? "series" : isLiveType(c.type) ? "live" : c.series === false ? "movie" : "series";
+  const rating = ratingOf(m);
+  const y = year(m) || (kinds()[c.key] || [])[2] || 0;
+  const item = { id: c.key, ref: makeRef(c.type, m.id), title: c.name.slice(0, 200), kind };
+  if (y) item.year = y;
+  const quality = qualityOf(c.name);
+  if (quality) item.quality = quality;
+  const poster = httpUrl(m.poster);
+  if (poster) item.poster = poster;
+  const backdrop = httpUrl(m.background);
+  if (backdrop) item.backdrop = backdrop;
+  const overview = c.overview || (m.description ? String(m.description) : "");
+  if (overview) item.overview = overview;
+  const genres = c.genres || genresOf(m);
+  if (genres) item.genres = genres;
+  if (rating !== undefined) item.rating = rating;
+  const ids = idsOf(m);
+  if (ids) item.ids = ids;
+  return item;
+}
+
+async function itemsOf(metas, cat, budget, deadline, adult) {
+  const cards = metas.map((m) => card(m, cat));
+  await enrich(cards, budget, deadline);
+  flushKinds();
   const seen = new Set();
-  for (const x of Array.isArray(s.subtitles) ? s.subtitles : []) {
-    if (!x || typeof x.url !== "string" || !/^https:\/\//i.test(x.url) || seen.has(x.url)) continue;
-    seen.add(x.url);
-    const raw = String(x.lang || "und").toLowerCase().trim();
-    const lang = (LANG2[raw] || raw).slice(0, 16);
-    out.push({ lang, url: x.url, format: /\.srt(\?|$)/i.test(x.url) ? "srt" : "vtt" });
-    if (out.length >= 10) break;
+  const items = [];
+  for (const c of cards) {
+    const item = toItem(c);
+    if (!item || seen.has(item.id)) continue;
+    if (adult) item.adult = true;
+    seen.add(item.id);
+    items.push(item);
+  }
+  return items;
+}
+
+function browseCatalogs(manifest) {
+  return manifest.catalogs.filter((c) => c.browsable && !isLiveType(c.type));
+}
+
+function rowsSetting() {
+  const n = num(kino.config.get("homeRows"));
+  return n > 0 && n <= 24 ? n : 4;
+}
+
+/**
+ * Rows for a list of `{ cat, genre, metas }`: the blank-title budget is shared by all of them and spent row by row, so
+ * the first rows are the best ones. `genre` is one of the server's sections of that catalog, or null for its default list.
+ */
+async function buildRows(specs, deadline) {
+  let budget = ENRICH_BUDGET;
+  const rows = [];
+  for (const { cat, genre, metas } of specs) {
+    if (!metas || !metas.length) continue;
+    const cards = metas.map((m) => card(m, cat));
+    const spend = Math.min(budget, cards.filter(needsMeta).length);
+    budget -= spend;
+    await enrich(cards, spend, deadline);
+    const adult = adultName(cat.name) || adultName(genre);
+    const items = cards.map(toItem).filter(Boolean);
+    if (adult) items.forEach((item) => { item.adult = true; });
+    if (!items.length) continue;
+    rows.push({
+      id: "r" + safeId(cat.id).slice(0, 80) + (genre ? "-" + hash(genre).slice(0, 8) : ""),
+      title: (genre || catalogTitle(cat)).slice(0, 100),
+      items,
+      ref: makeRef(cat.type, cat.id, genre ? { c: cat.id, g: genre } : { c: cat.id }),
+    });
+  }
+  flushKinds();
+  return rows;
+}
+
+async function homeRows(manifest) {
+  const cats = browseCatalogs(manifest).slice(0, rowsSetting());
+  const deadline = Date.now() + DEADLINE_MS;
+  const pages = await pool(cats, 5, async (cat) => (await catalogMetas(cat, "", 10000)).slice(0, 12));
+  return buildRows(cats.map((cat, i) => ({ cat, genre: null, metas: pages[i] })), deadline);
+}
+
+/** A row of live channels for each live catalog that has something playable: the first two, at most. */
+async function homeLiveRows(manifest) {
+  const cats = (await playableLiveCatalogs(manifest)).slice(0, 2);
+  const rows = await pool(cats, 2, async (cat) => {
+    const taken = new Set();
+    const items = (await catalogMetas(cat, "", 15000))
+      .slice(0, 12)
+      .map((m) => channelOf(m, cat, safeId(cat.id), taken))
+      .filter(Boolean)
+      .map((ch) => {
+        const item = { id: ch.id, ref: ch.ref, title: ch.title, kind: "live" };
+        if (ch.logo) item.poster = ch.logo;
+        return item;
+      });
+    return items.length ? { id: "v" + safeId(cat.id).slice(0, 90), title: catalogTitle(cat), items } : null;
+  });
+  return rows.filter(Boolean);
+}
+
+export async function home() {
+  const manifest = await loadManifest(false);
+  const [live, rows] = await Promise.all([homeLiveRows(manifest).catch(() => []), homeRows(manifest)]);
+  return live.concat(rows);
+}
+
+// ---- the server's sections as the plugin's own section: one tab per catalog, one row per section of that catalog
+
+const SECTION_TABS = 8; // Kino shows at most 8 tabs
+const SECTION_ROWS = 12;
+
+/** The catalogs whose tabs are showing: "Catálogos 1–8" is the first window, and so on (the plugin's settings). */
+function sectionCatalogs(manifest) {
+  const page = Math.max(1, num(kino.config.get("sectionPage")) || 1);
+  return browseCatalogs(manifest).slice((page - 1) * SECTION_TABS, page * SECTION_TABS);
+}
+
+export async function section(arg) {
+  const manifest = await loadManifest(false);
+  const cats = sectionCatalogs(manifest);
+  if (!cats.length) return { rows: [] };
+  const tabs = cats.map((c) => ({ id: safeId(c.id).slice(0, 100), label: catalogTitle(c).slice(0, 24) }));
+  const index = Math.max(0, tabs.findIndex((x) => x.id === (arg && arg.tab)));
+  const cat = cats[index];
+  const genres = [null].concat(cat.genres.slice(0, SECTION_ROWS - 1));
+  const deadline = Date.now() + DEADLINE_MS;
+  const pages = await pool(genres, 5, async (genre) => (await catalogMetas(cat, extrasOf({ genre }), 10000)).slice(0, 12));
+  const rows = await buildRows(genres.map((genre, i) => ({ cat, genre, metas: pages[i] })), deadline);
+  return { tabs, tab: tabs[index].id, rows };
+}
+
+// A category tile has no art of its own in the Stremio protocol: borrow the poster of the catalog's first title.
+const ART_KEY = "a1";
+const TTL_ART = 60 * 60 * 1000;
+
+async function categoryArt(cats) {
+  let cached = null;
+  try { cached = JSON.parse(kino.storage.get(ART_KEY) || "null"); } catch { /* unreadable: ask again */ }
+  if (cached && Date.now() - cached.at < TTL_ART) return cached.v;
+  const deadline = Date.now() + DEADLINE_MS;
+  const posters = await pool(cats, 5, async (cat) => {
+    if (Date.now() > deadline) return undefined;
+    const metas = await catalogMetas(cat, "", 8000);
+    const first = metas.find((m) => httpUrl(m.poster));
+    return first ? httpUrl(first.poster) : undefined;
+  });
+  const v = {};
+  cats.forEach((cat, i) => { if (posters[i]) v[cat.id] = posters[i]; });
+  if (Object.keys(v).length) {
+    try { kino.storage.set(ART_KEY, JSON.stringify({ at: Date.now(), v })); } catch { /* storage full: not cached */ }
+  }
+  return v;
+}
+
+export async function categories() {
+  const manifest = await loadManifest(false);
+  const cats = browseCatalogs(manifest).slice(0, 24);
+  const art = await categoryArt(cats);
+  return cats.map((cat) => {
+    const tile = {
+      id: "g" + safeId(cat.id).slice(0, 100),
+      title: catalogTitle(cat).slice(0, 40),
+      ref: makeRef(cat.type, cat.id, { c: cat.id }),
+    };
+    if (art[cat.id]) tile.art = art[cat.id];
+    return tile;
+  });
+}
+
+const SLICE = 24;
+
+/** The cursor is "<server skip>,<offset inside that page>": a server page is 100 cards, a Kino page shows fewer. */
+export async function browse(ref, cursor) {
+  const r = parseRef(ref);
+  const manifest = await loadManifest(false);
+  const cat = manifest.catalogs.find((c) => c.id === r.c && c.type === r.t);
+  if (!cat) throw kino.error("not_found", "no catalog", { userMessage: t("unknownRef") });
+  const [skipText, offsetText] = String(cursor || "0,0").split(",");
+  const skip = num(skipText);
+  const offset = num(offsetText);
+  const genre = typeof r.g === "string" && cat.genres.includes(r.g) ? r.g : null;
+  const metas = await catalogMetas(cat, extrasOf({ genre, skip }), 15000);
+  const slice = metas.slice(offset, offset + SLICE);
+  const items = await itemsOf(slice, cat, ENRICH_BUDGET, Date.now() + DEADLINE_MS, adultName(cat.name) || adultName(genre));
+  let next;
+  if (offset + SLICE < metas.length) next = `${skip},${offset + SLICE}`;
+  else if (metas.length >= PAGE && skip + metas.length < 10000) next = `${skip + metas.length},0`;
+  return next ? { items, next } : { items };
+}
+
+const MAX_SEARCH_CATALOGS = 18;
+
+export async function search(query) {
+  const q = String(query.q || "").trim();
+  if (q.length < 2) return [];
+  const manifest = await loadManifest(false);
+  let cats = manifest.catalogs.filter((c) => c.search && !isLiveType(c.type));
+  if (query.within) {
+    // Searching inside a "Ver más" page: only that page's catalog, and null when it cannot search (Kino then filters).
+    let r;
+    try { r = parseRef(query.within); } catch { return null; }
+    cats = cats.filter((c) => c.id === r.c && c.type === r.t);
+    if (!cats.length) return null;
+  }
+  cats = cats.slice(0, MAX_SEARCH_CATALOGS);
+  const deadline = Date.now() + DEADLINE_MS;
+  const found = await pool(cats, 5, async (cat) => (await catalogMetas(cat, extrasOf({ search: q }), 10000)).slice(0, 12).map((m) => card(m, cat)));
+  const seen = new Set();
+  const cards = [];
+  for (const list of found) {
+    for (const c of list || []) {
+      if (seen.has(c.key)) continue;
+      seen.add(c.key);
+      cards.push(c);
+    }
+  }
+  const top = cards.slice(0, 60);
+  await enrich(top, ENRICH_BUDGET, deadline);
+  flushKinds();
+  return top.map(toItem).filter(Boolean);
+}
+
+// ---- 7. titles ---------------------------------------------------------------------------------------------------
+
+async function getMeta(type, id) {
+  const data = await getJson(`/meta/${enc(type)}/${enc(id)}.json`, 15000);
+  if (!data || !data.meta) throw kino.error("not_found", "no meta", { userMessage: t("notStremio") });
+  return data.meta;
+}
+
+function learn(type, id, meta) {
+  const key = "n" + hash(id);
+  remember(key, meta.name, Array.isArray(meta.videos) && meta.videos.length > 0, year(meta));
+  flushKinds();
+}
+
+/** `kino.meta` by title: the ids Kino knows (TMDB, IMDb, AniList...), so its info page, subtitles and skip marks can work. */
+const SEARCH_NOISE = /\s*[\[(].*$/;
+
+async function externalIds(isSeries, meta) {
+  if (typeof kino.meta !== "function" || kino.meta.byTitle !== true) return undefined;
+  const title = String(meta.name || "").replace(SEARCH_NOISE, "").trim().slice(0, 200);
+  if (!title) return undefined;
+  const query = { type: isSeries ? "series" : "movie", title };
+  const y = year(meta);
+  if (y >= 1870 && y <= 2100) query.year = y;
+  try {
+    const answer = await kino.meta(query);
+    return answer && answer.ids ? answer.ids : undefined;
+  } catch (e) {
+    kino.log("kino.meta failed: " + (e && e.code));
+    return undefined;
+  }
+}
+
+/** What the server told about the ids wins; what Kino found fills the rest. */
+async function withExternalIds(info, meta, isSeries) {
+  const ext = await externalIds(isSeries, meta);
+  if (!ext) return info;
+  const ids = Object.assign({}, info.ids);
+  for (const k of ["tmdb", "imdb", "mal", "anilist", "kitsu"]) if (ids[k] === undefined && ext[k] !== undefined) ids[k] = ext[k];
+  if (Object.keys(ids).length) info.ids = ids;
+  return info;
+}
+
+export async function details(ref) {
+  const r = parseRef(ref);
+  const meta = await getMeta(r.t, r.i);
+  learn(r.t, r.i, meta);
+  return withExternalIds(seriesInfo(meta), meta, false);
+}
+
+export async function episodes(ref) {
+  const r = parseRef(ref);
+  const meta = await getMeta(r.t, r.i);
+  learn(r.t, r.i, meta);
+  const videos = (Array.isArray(meta.videos) ? meta.videos : []).filter((v) => v && typeof v.id === "string");
+  const list = [];
+  videos.forEach((v, index) => {
+    const season = num(v.season) || 1;
+    if (season < 1 || season > 999) return;
+    const number = num(v.episode != null ? v.episode : v.number) || index + 1;
+    const ep = { season, number: Math.min(Math.max(number, 1), 99999), ref: makeRef(r.t, v.id) };
+    const title = v.title || v.name;
+    if (title) ep.title = String(title).slice(0, 200);
+    const still = httpUrl(v.thumbnail);
+    if (still) ep.still = still;
+    const overview = v.overview || v.description;
+    if (overview) ep.overview = String(overview);
+    const aired = /^\d{4}-\d{2}-\d{2}/.exec(String(v.released || ""));
+    if (aired) ep.airDate = aired[0];
+    list.push(ep);
+  });
+  // A title with no episode list (a movie, to Stremio) plays as one entry: the card's own id is the playable one.
+  if (!list.length) list.push({ season: 1, number: 1, ref: makeRef(r.t, r.i), title: t("movieEpisode") });
+  list.sort((a, b) => (a.season - b.season) || (a.number - b.number));
+  return { series: await withExternalIds(seriesInfo(meta), meta, videos.length > 0), episodes: list };
+}
+
+// ---- 8. streams --------------------------------------------------------------------------------------------------
+
+const LANGS = {
+  eng: "en", spa: "es", por: "pt", fre: "fr", fra: "fr", ger: "de", deu: "de", ita: "it", hin: "hi", jpn: "ja", kor: "ko",
+  chi: "zh", zho: "zh", ara: "ar", rus: "ru", tur: "tr", ind: "id", tam: "ta", tel: "te", ben: "bn", mal: "ml", kan: "kn",
+};
+
+function langOf(code) {
+  const c = String(code || "").toLowerCase().trim();
+  return (LANGS[c] || c || "und").slice(0, 16);
+}
+
+function trackFormat(url) {
+  const decoded = decodeURIComponent(url.split("?")[0] + " " + (/[?&]url=([^&]+)/.exec(url) || [, ""])[1]);
+  return /\.vtt\b/i.test(decoded) ? "vtt" : /\.srt\b/i.test(decoded) ? "srt" : undefined;
+}
+
+function tracksOf(list) {
+  const out = [];
+  for (const s of Array.isArray(list) ? list : []) {
+    const url = s && httpUrl(s.url);
+    if (!url) continue;
+    const track = { lang: langOf(s.lang), url };
+    const format = trackFormat(url);
+    if (format) track.format = format;
+    out.push(track);
   }
   return out;
 }
 
-function toStream(s, index) {
-  const d = describe(s);
-  const url = String(s.url);
-  const parts = [t("copy", { n: index + 1 })];
-  if (d.quality) parts.push(qualityName(d.quality));
-  if (d.gb) parts.push(d.gb >= 1 ? d.gb.toFixed(1).replace(/\.0$/, "") + " GB" : Math.round(d.gb * 1024) + " MB");
-  if (d.server) parts.push(d.server);
-  const stream = { url, label: parts.join(" · ").slice(0, 48) };
-  const headers = headersOf(s);
-  if (Object.keys(headers).length) stream.headers = headers;
-  const mime = mimeOf(url);
-  if (mime) stream.mime = mime;
-  const subs = subtitlesOf(s);
-  if (subs.length) stream.subtitles = subs;
-  return { stream, quality: d.quality, gb: d.gb, tier: tierOf(url), index, key: fileKey(url) };
+function labelOf(s) {
+  const text = String(s.name || s.title || "").replace(VISUAL, "").replace(/\s+/g, " ").trim().slice(0, 48);
+  return text || undefined;
 }
 
-// ---- 8b. what failed before -------------------------------------------------------------------------------------
-
-// Kino only says a copy failed when the origin REFUSED it; a dead link just moves the player on. So a second resolve of the
-// same title soon after the first is read as "that copy did not work": the copy served first goes last for a while.
-const SERVED_PREFIX = "served:";
-const BAD_KEY = "bad";
-const REOPEN_WINDOW_MS = 2 * 60 * 1000;
-const BAD_FOR_MS = 10 * 60 * 1000;
-const BAD_MAX = 40;
-
-function readBad() {
-  try {
-    const raw = JSON.parse(kino.storage.get(BAD_KEY) || "{}");
-    const now = Date.now();
-    const out = {};
-    if (raw && typeof raw === "object" && !Array.isArray(raw)) for (const [k, until] of Object.entries(raw)) if (Number(until) > now) out[k] = Number(until);
-    return out;
-  } catch {
-    return {};
-  }
+function headersOf(s) {
+  const h = s.behaviorHints && s.behaviorHints.proxyHeaders && s.behaviorHints.proxyHeaders.request;
+  if (!h || typeof h !== "object") return undefined;
+  const out = {};
+  for (const k of Object.keys(h).slice(0, 20)) if (typeof h[k] === "string") out[k] = h[k];
+  return Object.keys(out).length ? out : undefined;
 }
 
-function writeBad(bad) {
-  try {
-    const entries = Object.entries(bad).sort((a, b) => b[1] - a[1]).slice(0, BAD_MAX);
-    kino.storage.set(BAD_KEY, JSON.stringify(Object.fromEntries(entries)), { ttlMs: BAD_FOR_MS });
-  } catch {
-    // a full storage: the order just is not learned this time
-  }
+function mimeOf(url) {
+  return /\.m3u8(\b|$)/i.test(url.split("?")[0]) || /\.m3u8/i.test(url) ? "application/x-mpegURL" : undefined;
 }
 
-async function streamsOf(type, id, capMs, retry) {
-  const startedAt = Date.now();
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const body = await slowJson(`/stream/${type}/${enc(id)}.json`, "warmingVideo", capMs);
-    const list = Array.isArray(body.streams) ? body.streams.filter(playable) : [];
-    if (list.length) return list;
-    // a second look only when the first answered fast enough to leave time inside Kino's 20 s
-    if (retry !== false && attempt < 1 && Date.now() - startedAt < 6000) await kino.sleep(800);
-    else break;
-  }
-  return [];
-}
+// A server that has nothing to play yet may answer with a stand-in address instead of leaving the stream out.
+const PLACEHOLDER_HOSTS = ["no.link"];
 
-// ---- 8c. the same title in another source ---------------------------------------------------------------------
-
-const RESOLVE_BUDGET_MS = 18500; // inside the 20 s Kino gives a resolve
-const XSRC_PREFIX = "xsrc:";
-const XSRC_FOR_MS = 6 * 60 * 60 * 1000;
-
-/** A title reduced to what two sources agree on: no season, year, tags or punctuation. */
-function normTitle(title) {
-  return String(title || "")
-    .toLowerCase()
-    .replace(/[\u2018\u2019]/g, "'")
-    .replace(/\(.*?\)|\[.*?\]|\{.*?\}/g, " ")
-    .replace(/\b(?:season|temporada)\s*\d+.*$/i, " ")
-    .replace(/\bs\d{1,2}\b.*$/i, " ")
-    .replace(/[^\p{L}\p{N}]+/gu, "");
-}
-
-function seasonOf(title) {
-  const m = /\bseason\s*(\d+)|\btemporada\s*(\d+)|\bS(\d{1,2})\b/i.exec(String(title || ""));
-  return m ? parseInt(m[1] || m[2] || m[3], 10) : null;
-}
-
-// A page-level id ("HDHub4U::https://…") has the title's files together; an episode's id (a JSON or "cncvariants") is one video.
-function isPageId(id) {
-  const d = decodeId(id);
-  return /^[^:{]+::https?:\/\//.test(d) && !/cncvariants/.test(d);
-}
-
-// Searches the other sources for the title, quickest first, and asks the first exact match for its streams. All of it inside
-// what is left of the resolve's budget; a match whose streams are not ready yet is warmed for the next try.
-async function crossSource(title, skipName, startedAt) {
-  const want = normTitle(title);
-  if (want.length < 2) return null;
-  const wantSeason = seasonOf(title);
-  const skip = sourceKey(skipName);
-  const lat = readLatency();
-  const pool = activeSources()
-    .filter((s) => sourceKey(s.title) !== skip && sourceKey(s.key) !== skip)
-    .sort((x, y) => (lat[x.key] || LATENCY_SEED_MS[x.key] || LATENCY_UNKNOWN_MS) - (lat[y.key] || LATENCY_SEED_MS[y.key] || LATENCY_UNKNOWN_MS));
-  for (const s of pool) {
-    let left = RESOLVE_BUDGET_MS - (Date.now() - startedAt);
-    if (left < 5000) return null;
-    let metas = [];
-    try {
-      const body = await getJson(`/catalog/${s.type || "other"}/${s.catalog}/search=${enc(title.replace(/\(.*?\)|\[.*?\]/g, " ").trim().slice(0, 60))}.json`, Math.min(2500, left - 3500), true);
-      metas = Array.isArray(body.metas) ? body.metas : [];
-    } catch {
-      continue;
-    }
-    const hit = metas.find((m) => {
-      if (!m || typeof m.id !== "string" || !m.id.startsWith("cnc:")) return false;
-      const name = cleanTitle(m.name);
-      if (normTitle(name) !== want) return false;
-      const season = seasonOf(m.name);
-      return wantSeason === null || season === null || season === wantSeason;
-    });
-    if (!hit) continue;
-    left = RESOLVE_BUDGET_MS - (Date.now() - startedAt);
-    if (left < 3000) return null;
-    try {
-      const raw = await streamsOf("other", hit.id, Math.min(8000, left - 500), false);
-      if (raw.length) return { raw, id: hit.id, source: s.title };
-    } catch {
-      // not ready: warmed below
-    }
-    await warmUp([`/stream/other/${enc(hit.id)}.json`]);
-    return null;
-  }
+/** Why Kino cannot play a stream even though it has a URL: "drm" (it carries ClearKey keys) or "soon" (a stand-in address). */
+function blockedBy(s) {
+  if (s.clearkey || s.drm || /[?&]clearkey=/i.test(s.url)) return "drm"; // CENC over HLS: the player cannot decrypt it
+  const host = /^https?:\/\/([^/:?#]+)/i.exec(s.url);
+  if (host && PLACEHOLDER_HOSTS.includes(host[1].toLowerCase())) return "soon";
   return null;
 }
 
-async function resolveVideo(id, ref, options) {
-  const startedAt = Date.now();
-  const source = sourceNameOf(id);
-  const title = titleOf(ref);
-  const head = splitRef(ref).head;
-  const canSwap = title.length > 1 && (head.startsWith("m:") || isPageId(id));
-  const memKey = XSRC_PREFIX + kino.crypto.hash("sha1", head).slice(0, 24);
-  let raw = [];
-  let from = "";
-  let failure = null;
-  // The same title was already found in another source for this ref: that one first (it was warm a moment ago).
-  if (canSwap) {
-    try {
-      const mem = JSON.parse(kino.storage.get(memKey) || "null");
-      if (mem && typeof mem.id === "string") {
-        raw = await streamsOf("other", mem.id, 8000, false);
-        if (raw.length) from = String(mem.source || "");
-      }
-    } catch {
-      raw = [];
-    }
-  }
-  if (!raw.length) {
-    try {
-      raw = await streamsOf("other", id, canSwap ? 9000 : undefined, !canSwap);
-    } catch (e) {
-      failure = e;
-    }
-    noteSource(source, raw.length > 0);
-  }
-  if (!raw.length && canSwap) {
-    const swap = await crossSource(title, source, startedAt);
-    if (swap) {
-      raw = swap.raw;
-      from = swap.source;
-      try {
-        kino.storage.set(memKey, JSON.stringify({ id: swap.id, source: swap.source }), { ttlMs: XSRC_FOR_MS });
-      } catch {
-        // not remembered
-      }
-    }
-  }
-  if (!raw.length) {
-    if (failure) throw failure;
-    throw kino.error("not_found", "no playable streams", { userMessage: t("noStreams") });
-  }
+/** A stream Kino can play: a URL, and not a torrent, a YouTube id, a link out to a web page (the donation card) or a blocked one. */
+function playable(s) {
+  return !!s && typeof s.url === "string" && /^https?:\/\//.test(s.url) && !s.infoHash && !s.ytId && !blockedBy(s);
+}
+
+function streamFor(list, live) {
   const seen = new Set();
-  const pref = String(kino.config.get("quality") || "1080");
-  const capGb = parseFloat(String(kino.config.get("maxSize") || "10")) || 0;
-  const bad = readBad();
-  const servedKey = SERVED_PREFIX + kino.crypto.hash("sha1", ref).slice(0, 24);
-  let prev = null;
-  try {
-    prev = JSON.parse(kino.storage.get(servedKey) || "null");
-  } catch {
-    prev = null;
+  const usable = list.filter(playable).filter((s) => !seen.has(s.url) && seen.add(s.url));
+  if (!usable.length) return null;
+  const main = usable[0];
+  const stream = { url: main.url };
+  const mime = mimeOf(main.url);
+  if (mime) stream.mime = mime;
+  const headers = headersOf(main);
+  if (headers) stream.headers = headers;
+  const label = labelOf(main);
+  if (label) stream.label = label;
+  if (live) stream.expiresInSeconds = 1800; // live URLs carry short-lived tokens: ask again when one stops working
+  else {
+    const subs = [];
+    const urls = new Set();
+    for (const s of usable) for (const track of tracksOf(s.subtitles)) if (!urls.has(track.url) && urls.add(track.url)) subs.push(track);
+    if (subs.length) stream.subtitles = subs.slice(0, 30);
   }
-  const now = Date.now();
-  const reopened = (options && options.retry) || (prev && typeof prev.t === "number" && now - prev.t < REOPEN_WINDOW_MS);
-  if (reopened && prev && prev.key) {
-    bad[prev.key] = now + BAD_FOR_MS;
-    writeBad(bad);
+  const alternatives = [];
+  const taken = new Map();
+  const unique = (text) => {
+    if (!text) return text;
+    const n = (taken.get(text) || 0) + 1;
+    taken.set(text, n);
+    return n === 1 ? text : `${text} · ${n}`.slice(0, 48);
+  };
+  stream.label = unique(stream.label);
+  for (const s of usable.slice(1, 9)) {
+    const alt = { url: s.url };
+    const m = mimeOf(s.url);
+    if (m) alt.mime = m;
+    const h = headersOf(s);
+    if (h) alt.headers = h;
+    const l = unique(labelOf(s));
+    if (l) alt.label = l;
+    alternatives.push(alt);
   }
-  const heavy = (x) => (capGb > 0 && x.gb > capGb ? 1 : 0);
-  const pool = raw
-    .map((s, i) => toStream(s, i))
-    .filter((x) => (seen.has(x.stream.url) ? false : (seen.add(x.stream.url), true)))
-    .sort(
-      (a, b) =>
-        (bad[a.key] ? 1 : 0) - (bad[b.key] ? 1 : 0) ||
-        heavy(a) - heavy(b) ||
-        qualityRank(a.quality, pref) - qualityRank(b.quality, pref) ||
-        a.tier - b.tier ||
-        (a.gb || 99) - (b.gb || 99) ||
-        a.index - b.index,
-    );
-  if (!pool.length) throw kino.error("not_found", "no playable streams", { userMessage: t("noStreams") });
-  const [first, ...rest] = pool;
-  try {
-    kino.storage.set(servedKey, JSON.stringify({ t: now, key: first.key }), { ttlMs: BAD_FOR_MS });
-  } catch {
-    // not remembered: the next play just starts from the same order
-  }
-  const mark = (st) => (from ? { ...st, label: `${from} · ${st.label}`.slice(0, 48) } : st);
-  const main = { ...mark(first.stream), expiresInSeconds: 1800 };
-  const alternatives = rest.slice(0, 8).map((x) => mark(x.stream));
-  if (alternatives.length) main.alternatives = alternatives;
-  return main;
+  if (alternatives.length) stream.alternatives = alternatives;
+  return stream;
 }
 
-// ---- 9. live --------------------------------------------------------------------------------------------------
-
-// A live category is a catalog (an events source) or JioTV with one genre; the id says which.
-function liveSpec(categoryId) {
-  const ev = EVENTS.find((e) => e.id === categoryId);
-  if (ev) return { catalog: ev.catalog, genre: "" };
-  const l = /^jiol-(\d{1,2})$/.exec(String(categoryId || ""));
-  if (l) return { catalog: JIO_LANG_CATALOG, genre: JIO_LANGS[parseInt(l[1], 10) - 1] || "" };
-  const m = /^jio-(\d{1,2})$/.exec(String(categoryId || ""));
-  return m ? { catalog: JIO_CATALOG, genreIndex: parseInt(m[1], 10) } : null;
+async function streamsOf(type, id) {
+  const data = await getJson(`/stream/${enc(type)}/${enc(id)}.json`, 25000);
+  return Array.isArray(data && data.streams) ? data.streams : [];
 }
 
-function genreLabel(g) {
-  const key = "genre" + g.replace(/[^A-Za-z]/g, "");
-  return TEXTS.es[key] ? t(key) : g;
+export async function resolve(ref) {
+  const r = parseRef(ref);
+  const live = isLiveType(r.t);
+  let list = r.i ? await streamsOf(r.t, r.i) : [];
+  let stream = streamFor(list, live);
+  if (!stream && live && r.c && r.n) {
+    // The id inside a saved channel may be stale (its token expired): find the channel again by name and ask afresh.
+    const cat = (await loadManifest(false)).catalogs.find((c) => c.id === r.c);
+    const fresh = cat ? (await catalogMetas(cat, "", 15000)).find((m) => plainName(m.name) === r.n) : null;
+    if (fresh) {
+      list = await streamsOf(r.t, fresh.id);
+      stream = streamFor(list, true);
+    }
+  }
+  if (!stream) {
+    const why = list.map((s) => (s && typeof s.url === "string" ? blockedBy(s) : null)).filter(Boolean);
+    const key = why.includes("soon") && !why.includes("drm") ? "notYet" : why.includes("drm") ? "drmOnly" : live ? "noChannel" : "noStreams";
+    throw kino.error("unavailable", "no streams", { userMessage: t(key) });
+  }
+  return stream;
+}
+
+// ---- 9. live channels --------------------------------------------------------------------------------------------
+
+const LIVE_OK_KEY = "p1";
+const TTL_LIVE_OK = 30 * 60 * 1000;
+
+/**
+ * The live catalogs worth showing: those whose first channels have a stream Kino can play. A catalog whose channels all
+ * come with ClearKey keys (the player cannot decrypt them) is left out until the server offers something else. The
+ * verdict is kept for half an hour; a catalog that could not be checked is shown.
+ */
+async function playableLiveCatalogs(manifest) {
+  const cats = manifest.catalogs.filter((c) => c.browsable && isLiveType(c.type));
+  let cached = null;
+  try { cached = JSON.parse(kino.storage.get(LIVE_OK_KEY) || "null"); } catch { /* unreadable: check again */ }
+  if (cached && Date.now() - cached.at < TTL_LIVE_OK) return cats.filter((c) => cached.v[c.id] !== false);
+  const verdicts = await pool(cats, 5, async (cat) => {
+    const metas = (await catalogMetas(cat, "", 20000)).slice(0, 2);
+    let asked = false;
+    for (const m of metas) {
+      try {
+        const list = await streamsOf(cat.type, m.id);
+        asked = true;
+        if (list.some(playable)) return true;
+      } catch { /* try the next one */ }
+    }
+    return asked ? false : undefined;
+  });
+  const v = {};
+  cats.forEach((cat, i) => { if (verdicts[i] !== undefined) v[cat.id] = verdicts[i]; });
+  try { kino.storage.set(LIVE_OK_KEY, JSON.stringify({ at: Date.now(), v })); } catch { /* storage full: not cached */ }
+  return cats.filter((c) => v[c.id] !== false);
 }
 
 export async function liveCategories() {
-  const out = EVENTS.map((e) => ({ id: e.id, title: t("tileEvents", { name: e.title }), genre: "deportes" }));
-  let genres = [];
-  try {
-    genres = await genresOf(JIO_CATALOG);
-  } catch (e) {
-    if (e && (e.code === "auth_required" || e.code === "invalid_request")) throw e;
-    kino.log("jio genres failed: " + (e && e.message));
-  }
-  genres.forEach((g, i) => out.push({ id: "jio-" + (i + 1), title: t("tileJio", { name: genreLabel(g) }), genre: JIO_VOCAB[g] || "entretenimiento", country: "IN" }));
-  const want = (String(kino.config.get("jioLangs") || JIO_LANGS_DEFAULT).trim().toLowerCase() || "all");
-  let langs = want === "all" ? JIO_LANGS.map((l) => l.toLowerCase()) : want.split(",").map((x) => x.trim());
-  if (!showOther()) langs = langs.filter((l) => l === "english");
-  JIO_LANGS.forEach((l, i) => {
-    if (langs.includes(l.toLowerCase())) out.push({ id: "jiol-" + (i + 1), title: t("tileJioLang", { name: l }), genre: "entretenimiento", country: "IN" });
-  });
-  return out;
+  const manifest = await loadManifest(false);
+  return (await playableLiveCatalogs(manifest)).map((c) => ({ id: safeId(c.id), title: catalogTitle(c) }));
 }
 
-function channelOf(m, categoryId) {
-  const out = {
-    id: kinoId(m.id),
-    title: String(m.name || "").replace(/[⠀​]/g, "").replace(/^[^\p{L}\p{N}(\[]+/u, "").slice(0, 120) || "Channel",
-    ref: "l:" + m.id,
-    categoryId,
-  };
-  if (typeof m.poster === "string" && m.poster.startsWith("https://")) out.logo = m.poster;
-  return out;
+/** What names a channel, without the live/ended marks a server puts in front of an event's title. */
+function plainName(name) {
+  return String(name || "").replace(VISUAL, "").replace(/\s+/g, " ").trim();
 }
 
-// The bridge ignores `skip` on these catalogs (it answers the whole list each time), so a page is a slice. Not cached: a
-// JioTV list is ~1.5 KB per channel and carries signed links.
-async function liveList(categoryId) {
-  const spec = liveSpec(categoryId);
-  if (!spec) return [];
-  let genre = spec.genre || "";
-  if (spec.genreIndex) genre = (await genresOf(JIO_CATALOG))[spec.genreIndex - 1] || "";
-  if (spec.catalog === JIO_LANG_CATALOG && !genre) return [];
-  const body = await getJson(`/catalog/tv/${spec.catalog}${genre ? "/genre=" + enc(genre) : ""}.json`, SLOW_TIMEOUT_MS);
-  const hideUpcoming = kino.config.get("hideUpcoming") !== false;
-  const seen = new Set();
-  return (Array.isArray(body.metas) ? body.metas : []).filter((m) => {
-    if (!m || typeof m.id !== "string" || !m.id.startsWith("cnc:") || m.id.length > 4000 || !String(m.name || "").trim()) return false;
-    if (hideUpcoming && /^\s*🔜/u.test(String(m.name))) return false;
-    if (seen.has(m.id)) return false;
-    seen.add(m.id);
-    return true;
-  });
+/** One server card as a Kino channel, or null when it has no name. `taken` keeps ids unique inside one answer. */
+function channelOf(m, cat, categoryId, taken) {
+  const name = BLANK.test(String(m.name || "")) ? "" : plainName(m.name);
+  if (!name) return null;
+  let id = "l" + hash(cat.id + "|" + name);
+  if (taken.has(id)) id = "l" + hash(cat.id + "|" + name + "|" + m.id);
+  taken.add(id);
+  // The stremio id may be huge and holds an expiring token: keep it only while it fits, resolve() can find the channel by name.
+  const withId = makeRef(cat.type, m.id, { c: cat.id, n: name });
+  const channel = { id, title: String(m.name).trim().slice(0, 200), ref: withId.length <= 4000 ? withId : makeRef(cat.type, "", { c: cat.id, n: name }), categoryId };
+  const logo = httpUrl(m.poster) || httpUrl(m.logo);
+  if (logo) channel.logo = logo;
+  return channel;
 }
 
-export async function liveChannels({ categoryId, cursor }) {
-  const metas = await liveList(categoryId);
-  const from = cursor ? Math.max(0, parseInt(cursor, 10) || 0) : 0;
-  const page = metas.slice(from, from + LIVE_PAGE);
-  return { items: page.map((m) => channelOf(m, categoryId)), next: from + LIVE_PAGE < metas.length ? String(from + LIVE_PAGE) : null };
+const CHANNEL_PAGE = 500;
+
+/** The cursor is "<server skip>,<offset inside that page>", like browse's: a server page may hold more than Kino takes. */
+export async function liveChannels(arg) {
+  const manifest = await loadManifest(false);
+  const cat = manifest.catalogs.find((c) => isLiveType(c.type) && safeId(c.id) === arg.categoryId);
+  if (!cat) return { items: [] };
+  const [skipText, offsetText] = String(arg.cursor || "0,0").split(",");
+  const skip = num(skipText);
+  const offset = num(offsetText);
+  const metas = await catalogMetas(cat, extrasOf({ skip }), 20000);
+  // Some catalogs ignore `skip` and send the same list again: a page that opens with the first page's card is the end.
+  const first = skip ? await catalogMetas(cat, "", 20000) : null;
+  if (first && first.length && metas.length && first[0].id === metas[0].id) return { items: [] };
+  const taken = new Set();
+  const items = metas.slice(offset, offset + CHANNEL_PAGE).map((m) => channelOf(m, cat, arg.categoryId, taken)).filter(Boolean);
+  let next = null;
+  if (offset + CHANNEL_PAGE < metas.length) next = `${skip},${offset + CHANNEL_PAGE}`;
+  else if (metas.length >= PAGE && skip + metas.length < 10000) next = `${skip + metas.length},0`;
+  return { items, next };
 }
 
-export async function liveSearch({ query }) {
-  const q = encodeURIComponent(String(query || "").trim());
-  if (!q) return { items: [] };
-  const catalogs = [JIO_CATALOG].concat(EVENTS.map((e) => e.catalog));
-  const lists = await mapLimit(catalogs, 6, async (c) => {
-    try {
-      const body = await getJson(`/catalog/tv/${c}/search=${q}.json`, SEARCH_SOURCE_TIMEOUT_MS, true);
-      return Array.isArray(body.metas) ? body.metas : [];
-    } catch (e) {
-      if (e && (e.code === "auth_required" || e.code === "invalid_request")) throw e;
-      return [];
-    }
+const MAX_LIVE_SEARCH_CATALOGS = 12;
+
+/** Channels by name across the live catalogs that can search; each hit names its category so Kino can place it. */
+export async function liveSearch(arg) {
+  const q = String(arg.query || "").trim();
+  if (q.length < 2) return { items: [] };
+  const manifest = await loadManifest(false);
+  const cats = (await playableLiveCatalogs(manifest)).filter((c) => c.search).slice(0, MAX_LIVE_SEARCH_CATALOGS);
+  const found = await pool(cats, 5, async (cat) => {
+    const taken = new Set();
+    return (await catalogMetas(cat, extrasOf({ search: q }), 10000)).slice(0, 40).map((m) => channelOf(m, cat, safeId(cat.id), taken)).filter(Boolean);
   });
   const seen = new Set();
   const items = [];
-  for (const metas of lists) {
-    for (const m of metas) {
-      if (!m || typeof m.id !== "string" || !m.id.startsWith("cnc:") || m.id.length > 4000 || seen.has(m.id) || !String(m.name || "").trim()) continue;
-      if (kino.config.get("hideUpcoming") !== false && /^\s*🔜/u.test(String(m.name))) continue;
-      seen.add(m.id);
-      items.push({ ...channelOf(m, ""), categoryId: undefined, adult: false });
-    }
-  }
+  for (const list of found) for (const c of list || []) if (!seen.has(c.id) && seen.add(c.id)) items.push(c);
   return { items: items.slice(0, 100) };
 }
 
-const LIVE_RETRY_MS = 2 * 60 * 1000;
+// ---- 10. subtitles -----------------------------------------------------------------------------------------------
 
-async function resolveLive(id) {
-  const body = await slowJson(`/stream/tv/${enc(id)}.json`, "warmingVideo");
-  const streams = (Array.isArray(body.streams) ? body.streams : []).filter(playable);
-  if (!streams.length) throw kino.error("not_found", "no streams", { userMessage: t("noSignal") });
-  // HLS first (a DASH copy comes through the bridge's own proxy), then the bridge's order.
-  streams.sort((a, b) => tierOf(a.url) - tierOf(b.url));
-  // Opening the same channel again within LIVE_RETRY_MS means the copy served last did not play: it is remembered as bad.
-  const key = "try:" + kino.crypto.hash("sha1", id).slice(0, 24);
-  let bad = [];
-  try {
-    const last = JSON.parse(kino.storage.get(key) || "null");
-    if (last && Array.isArray(last.bad)) bad = last.bad.filter((x) => Date.now() - x.t < BAD_FOR_MS);
-    if (last && last.url && Date.now() - last.t < LIVE_RETRY_MS) bad.push({ url: last.url, t: Date.now() });
-  } catch {
-    bad = [];
-  }
-  let fresh = streams.filter((s) => !bad.some((x) => x.url === s.url));
-  if (!fresh.length) {
-    bad = [];
-    fresh = streams;
-  }
-  const pick = fresh[0];
-  try {
-    kino.storage.set(key, JSON.stringify({ t: Date.now(), url: pick.url, bad: bad.slice(-8) }), { ttlMs: BAD_FOR_MS });
-  } catch {
-    // the memory is a nicety: the channel plays without it
-  }
-  const out = { url: pick.url, headers: headersOf(pick) };
-  const mime = mimeOf(pick.url);
-  if (mime) out.mime = mime;
-  return out;
+export async function subtitles(arg) {
+  const manifest = await loadManifest(false);
+  if (!manifest.resources.includes("subtitles") || !arg.imdbId) return [];
+  const series = arg.kind === "series";
+  const id = series && arg.season && arg.episode ? `${arg.imdbId}:${arg.season}:${arg.episode}` : arg.imdbId;
+  const data = await getJson(`/subtitles/${series ? "series" : "movie"}/${enc(id)}.json`, 9000);
+  return tracksOf(data && data.subtitles);
 }
 
-// ---- 10. resolve ----------------------------------------------------------------------------------------------
+// ---- 11. settings ------------------------------------------------------------------------------------------------
 
-export async function resolve(ref, options) {
-  const r = String(ref || "");
-  const live = idOf(r, "l:");
-  if (live) return resolveLive(live);
-  const id = idOf(r, "m:") || idOf(r, "e:");
-  if (!id) throw kino.error("not_found", "not a playable ref: " + r.slice(0, 80));
-  return resolveVideo(id, r, options);
+function detailOf(e) {
+  return (e && (e.userMessage || e.code)) || "error";
 }
-
-// ---- 11. settings ---------------------------------------------------------------------------------------------
 
 export async function settingsStatus() {
-  const keys = cacheKeys();
-  let chars = 0;
-  for (const k of keys) chars += k.length + (kino.storage.get(k) || "").length;
-  const h = readHealth();
-  const state = !h || h.ok === undefined ? "healthNone" : h.ok ? "healthOk" : "healthFail";
-  return { cache: t("cacheStatus", { n: keys.length, kb: Math.ceil(chars / 1024) }), health: t(state) };
+  try {
+    const manifest = await loadManifest(false);
+    return { serverStatus: t("online", { catalogs: manifest.catalogs.length }) };
+  } catch (e) {
+    return { serverStatus: t("offline", { detail: detailOf(e) }) };
+  }
 }
 
+/** Walks the same road a person does (manifest, catalog, title page, stream) and names the first step that fails. */
 export async function action(key) {
-  if (key === "clearCache") {
-    for (const k of cacheKeys()) kino.storage.remove(k);
-    return { message: t("cacheCleared") };
-  }
-  if (key === "probe") {
-    try {
-      await getJson("/manifest.json", LIST_TIMEOUT_MS);
-      return { message: t("probeOk") };
-    } catch (e) {
-      if (e && (e.code === "auth_required" || e.code === "invalid_request")) throw e;
-      return { message: t("probeFail") };
-    }
-  }
-  throw kino.error("not_found", "unknown action " + String(key).slice(0, 40));
+  if (key !== "checkConn") return null;
+  let manifest;
+  try { manifest = await loadManifest(true); } catch (e) { return { message: t("stepManifest", { detail: detailOf(e) }) }; }
+  const cat = browseCatalogs(manifest)[0];
+  if (!cat) return { message: t("stepCatalog", { detail: "0" }) };
+  let metas;
+  try {
+    metas = await catalogMetas(cat, "", 15000);
+    if (!metas.length) throw kino.error("unavailable", "empty");
+  } catch (e) { return { message: t("stepCatalog", { detail: catalogTitle(cat) + ": " + detailOf(e) }) }; }
+  const sample = metas[0];
+  const type = String(sample.type || cat.type);
+  try { await getMeta(type, sample.id); } catch (e) { return { message: t("stepMeta", { detail: detailOf(e) }) }; }
+  try {
+    if (!streamFor(await streamsOf(type, sample.id), false)) throw kino.error("unavailable", "no streams");
+  } catch (e) { return { message: t("stepStream", { detail: detailOf(e) }) }; }
+  return { message: t("ok", { catalogs: manifest.catalogs.length }) };
 }

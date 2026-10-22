@@ -1,4 +1,4 @@
-// TypeScript declarations for Kino plugins (apiVersion 1 to 9; 9 adds the player panel (panel, panelAction, playerEvent, the manifest's panel and settingsLayout), fetchHosts "any" for hand-written plugins, English setting texts and kino.meta by title; 8 adds the audio item kinds music and podcast; 7 adds tracking and segments; apiVersion 5 only adds the manifest's signature, 6 the plain-plugin SDK: typed and larger secrets, migrate, signed streams, the settings form, debug, telemetry, section, categories, theme and scopedSearch). Reference them from plugin.js
+// TypeScript declarations for Kino plugins (apiVersion 1 to 11; 11 adds the externalResolve capability (a stream's `external` hand-off to a resolver app, the manifest's externalResolver) and, from Kino 0.9.66, a stream's advisory `media` and its `portable` universal copy; 10 adds the playlists capability; 9 adds the player panel (panel, panelAction, playerEvent, the manifest's panel and settingsLayout), fetchHosts "any" for hand-written plugins, English setting texts and kino.meta by title; 8 adds the audio item kinds music and podcast; 7 adds tracking and segments; apiVersion 5 only adds the manifest's signature, 6 the plain-plugin SDK: typed and larger secrets, migrate, signed streams, the settings form, debug, telemetry, section, categories, theme and scopedSearch). Reference them from plugin.js
 // with `/// <reference path="./kino.d.ts" />` for editor help; Kino itself runs plain JavaScript.
 // The numbers in the comments come from contract.json, which is authoritative. The app checks that
 // every `kino` member declared here exists in its runtime and nothing else does (KinoDtsTest).
@@ -72,7 +72,7 @@ interface KinoItem {
   quality?: string;
   /** At most 3, each at most 20 characters; shown as chips. */
   badges?: string[];
-  /** apiVersion 6: true = an 18+ entry, shown only while the person's 18+ code is unlocked on that device (Ajustes ▸ Adultos). Below apiVersion 6 it is dropped. */
+  /** apiVersion 6: true = an 18+ entry, shown only while the person's 18+ code is unlocked on that device (Ajustes ▸ Control parental). Below apiVersion 6 it is dropped. */
   adult?: boolean;
 }
 
@@ -166,6 +166,7 @@ interface KinoStream {
   /**
    * https on a declared host (http only on one declared `insecureHttp`), or the person's own server exactly as typed.
    * A live channel's stream of a plugin approved for `"liveStreamHosts": "any"` may be on any public host, http or https.
+   * Ignored when `external` is given instead (apiVersion 11): then `url` may be omitted or left empty.
    */
   url: string;
   mime?: string;
@@ -252,12 +253,74 @@ interface KinoStream {
    * A person's hand correction wins over it; it wins over AniSkip. Ignored for a live channel.
    */
   skip?: { openingStartMs?: number; openingEndMs?: number; endingStartMs?: number };
+  /**
+   * apiVersion 11: instead of a playable `url`, hand this stream to an independently-installed app that declares it
+   * can resolve `protocol` (Kino never interprets `protocol` or `ref` itself). `ref` is opaque, 1..2048 characters,
+   * never logged in full. When `external` is present, `url` is ignored. See the External Source Resolver guide.
+   */
+  external?: {
+    protocol: string;
+    ref: string;
+    /**
+     * Android package of the one resolver app this stream wants. Overrides the manifest's `externalResolver.package`.
+     * Kino asks only that app (the person still has to allow it) and never another one in its place; if it isn't
+     * installed and the manifest doesn't name a download for it, the stream fails.
+     */
+    resolver?: string;
+  };
+  /**
+   * Kino 0.9.66, optional and ADVISORY: what you know about the file itself. Kino shows and logs it and may use it as a
+   * hint (for a cast), never for anything that could harm the person. Every field is optional; text is one line cut at 120
+   * characters (`codec`/`container` 40, `language` 20), numbers are clamped, at most 16 tracks and 4 `notes`; an object with
+   * nothing usable left is dropped, and a bad `media` never refuses the stream. Older Kino ignores it.
+   */
+  media?: KinoStreamMedia;
+  /**
+   * Kino 0.9.66, optional: a universal copy of THIS video, for a source that can make one on demand (an external resolver app
+   * that converts): HLS, H.264 8-bit up to 1080p, stereo AAC, playable by any TV receiver. Checked exactly like `url`
+   * (anything else, a non-HLS `mime` included, drops it and the rest still counts); ignored next to `drm`, request signing or
+   * `external`. The phone's own player never uses it; Kino casts it when the title's own cast route needs a conversion or the
+   * stream is likely not playable as it is. See the External Source Resolver guide.
+   */
+  portable?: { url: string; mime?: "application/x-mpegURL" | "application/vnd.apple.mpegurl" };
 }
 
-/** One of a Stream's `alternatives`: a URL (labelled from apiVersion 6), or (apiVersion 6) a lazy `{ label, ref }`. */
+/** What a stream's source says about the media itself (`KinoStream.media`). */
+interface KinoStreamMedia {
+  /** The file's own name or a title for it. */
+  title?: string;
+  /** Bytes of the file being served (0..2^50). */
+  sizeBytes?: number;
+  /** The container as the source names it ("matroska,webm", "mp4"…). Display only: never given to the player. */
+  container?: string;
+  video?: {
+    codec?: string;
+    profile?: string;
+    width?: number;
+    height?: number;
+    fps?: number;
+    /** 0..16 */
+    bitDepth?: number;
+    hdr?: boolean;
+  };
+  /** The FILE's audio tracks, converted or not. */
+  audio?: { codec?: string; channels?: number; language?: string; title?: string; default?: boolean }[];
+  /** The FILE's subtitle tracks; `text` is true for the text formats (SubRip, ASS, WebVTT…) as opposed to bitmaps (PGS…). */
+  subtitles?: { codec?: string; language?: string; title?: string; text?: boolean }[];
+  /** The source re-encoded the file to make it playable: what it serves is not what the file holds. */
+  converted?: boolean;
+  /** Short plain remarks in the source's own words, at most 4. */
+  notes?: string[];
+}
+
+/**
+ * One of a Stream's `alternatives`: a URL (labelled from apiVersion 6), (apiVersion 6) a lazy `{ label, ref }`, or
+ * (apiVersion 11) an external hand-off.
+ */
 type KinoStreamAlternative =
   | { url: string; mime?: string; headers?: Record<string, string>; label?: string }
-  | { ref: string; label?: string };
+  | { ref: string; label?: string }
+  | { external: { protocol: string; ref: string; resolver?: string }; label?: string };
 
 /** apiVersion 3, capability "channels": a section of the En vivo tab. */
 interface KinoLiveCategory {
@@ -272,7 +335,7 @@ interface KinoLiveCategory {
    * the list is ignored. Kino versions before this field ignore it.
    */
   genre?: KinoGenre;
-  /** apiVersion 6: true = an 18+ entry, shown only while the person's 18+ code is unlocked on that device (Ajustes ▸ Adultos). Below apiVersion 6 it is dropped. Every channel listed in it is 18+ too. */
+  /** apiVersion 6: true = an 18+ entry, shown only while the person's 18+ code is unlocked on that device (Ajustes ▸ Control parental). Below apiVersion 6 it is dropped. Every channel listed in it is 18+ too. */
   adult?: boolean;
 }
 
@@ -305,6 +368,16 @@ interface KinoPlaylist {
 }
 
 /**
+ * apiVersion 10, capability "playlists": one of the person's own playlists on that plugin's service
+ * (not an M3U/IPTV channel list — see {@link KinoPlaylist} for that, an unrelated, older concept).
+ */
+interface KinoHostedPlaylist {
+  id: string;
+  title: string;
+  itemCount: number;
+}
+
+/**
  * One channel: give `ref` (resolved on play, exactly like a `live` item's) or `stream` (played as
  * is, checked like `resolve()`'s answer). With both, the stream plays and `ref` is the fallback.
  * An `id` starting with `~` is reserved for Kino and dropped.
@@ -325,7 +398,7 @@ interface KinoLiveChannel {
   /** 1..9999. */
   number?: number;
   /**
-   * apiVersion 6: true = an 18+ entry, shown only while the person's 18+ code is unlocked on that device (Ajustes ▸ Adultos).
+   * apiVersion 6: true = an 18+ entry, shown only while the person's 18+ code is unlocked on that device (Ajustes ▸ Control parental).
    * Below apiVersion 6 it is dropped. On a liveSearch hit, `false` says it is plain (needed when your categories can't be
    * read and it carries no `categoryId`): mark every hit with `adult` or `categoryId`.
    */
@@ -386,7 +459,7 @@ interface KinoCategory {
   art?: string;
   /** At most 4096 characters. */
   ref: string;
-  /** apiVersion 6: true = an 18+ entry, shown only while the person's 18+ code is unlocked on that device (Ajustes ▸ Adultos). Below apiVersion 6 it is dropped. */
+  /** apiVersion 6: true = an 18+ entry, shown only while the person's 18+ code is unlocked on that device (Ajustes ▸ Control parental). Below apiVersion 6 it is dropped. */
   adult?: boolean;
 }
 
@@ -429,6 +502,11 @@ interface KinoPanelContext {
   values: { video: Record<string, KinoPanelValue>; plugin: Record<string, KinoPanelValue> };
   /** The player's own properties in effect: the step, the speed, the resize mode and your `autoNext` when you set one. */
   player: { seekStepMs: number; speed?: number; resize?: KinoPlayerResize; autoNext?: { enabled: boolean; countdownS: number; nextRef?: string } };
+  /**
+   * Kino 0.9.64 (additive): what this Kino draws beyond apiVersion 9's panel; `"loading"`: the `loading` element. Absent on
+   * an older Kino, which drops that element: check it before you answer with one.
+   */
+  features?: "loading"[];
 }
 
 type KinoPanelValue = string | boolean | number | null;
@@ -468,6 +546,12 @@ type KinoPanelElement =
   | { type: "text-input"; key: string; label: string; labelEn?: string; scope?: KinoPanelScope; hint?: string; hintEn?: string; placeholder?: string; placeholderEn?: string }
   /** https, up to 512 characters, on a public host with a dot, or a public IPv4 address (never the device or the home network: no single-label or local name, private address or IPv6 literal). */
   | { type: "qr"; url: string; label?: string; labelEn?: string }
+  /**
+   * Kino 0.9.64 (additive, any apiVersion): a spinner, with `text` beside it (else Kino's «Cargando…»). Answer at once
+   * with the tab's shell and this element, and set `refreshMs` so Kino asks again for the finished tab. Send it only when
+   * `context.features` includes "loading": an older Kino drops it as an unknown element (answer a `status` line there).
+   */
+  | { type: "loading"; text?: string; textEn?: string }
   /** The series' episodes, the current one highlighted; choosing one plays it. */
   | { type: "episodes"; ref: string }
   /** Not in this Kino: dropped ("needs a newer Kino"). Reserved for a later version. */
@@ -480,7 +564,10 @@ interface KinoPanel {
   /** Up to 60 characters. */
   title?: string;
   titleEn?: string;
-  /** `modal` (default): centred over the video. `panel`: a side strip with the video visible behind. */
+  /**
+   * Accepted for compatibility; both values look the same: the panel is a drawer over the whole player
+   * (from the right on TV and a phone held sideways, from the bottom on a phone held upright). The video keeps playing.
+   */
   presentation?: "modal" | "panel";
   /** `#RRGGBB`; kept only when it passes the same rules as the manifest theme's `accent`. */
   accent?: string;
@@ -612,6 +699,27 @@ interface KinoPlugin {
   liveSearch?(arg: { query: string }): Promise<KinoLiveChannelPage | KinoLiveChannel[]>;
   /** apiVersion 3, optional with "channels". At most 50 channels and a 24 h window per call. */
   guide?(arg: { channelIds: string[]; from: number; to: number }): Promise<KinoGuideEntry[]>;
+  /**
+   * apiVersion 10, capability "playlists" (optional with it, like every function below). The
+   * playlists already in the person's account on this service.
+   */
+  playlists?(): Promise<KinoHostedPlaylist[]>;
+  /**
+   * apiVersion 10, optional with "playlists". A page of one playlist's items, the same shape as
+   * {@link KinoPlugin.browse}.
+   */
+  playlistItems?(arg: { playlistId: string; cursor: string | null }): Promise<KinoPage | KinoItem[]>;
+  /**
+   * apiVersion 10, optional with "playlists". Absent means Kino never offers "crear lista nueva" for
+   * this plugin.
+   */
+  playlistCreate?(arg: { title: string }): Promise<{ id: string }>;
+  /** apiVersion 10, optional with "playlists", independently of playlistRemoveItem. */
+  playlistAddItem?(arg: { playlistId: string; ref: string }): Promise<void>;
+  /** apiVersion 10, optional with "playlists", independently of playlistAddItem. */
+  playlistRemoveItem?(arg: { playlistId: string; ref: string }): Promise<void>;
+  /** apiVersion 10, optional with "playlists". The new full order, as a list of every item's `ref`. */
+  playlistReorder?(arg: { playlistId: string; refs: string[] }): Promise<void>;
   /**
    * The settings form's texts (manifest, not code): since Kino 0.9.55 a setting may add `labelEn`, `hintEn` and (an action,
    * next to `confirm`) `confirmEn`, an option and a list field `labelEn` (a field also `hintEn`), each with the base field's
@@ -1353,3 +1461,32 @@ interface KinoTitleMeta {
  * answer in install order wins, within 6 s (a timeout or a throw is just no answer, never shown), remembered 30 minutes.
  */
 type KinoMetaFn = (query: KinoMetaQuery) => Promise<KinoTitleMeta | null>;
+
+/**
+ * apiVersion 11, manifest field `"externalResolver"` (needs the `externalResolve` capability): the resolver app this
+ * plugin wants by default, and optionally where to get it when it isn't installed.
+ *
+ *     "externalResolver": {
+ *       "package": "com.example.resolver",
+ *       "apk": { "url": "https://github.com/acme/resolver/releases/download/v1.0/resolver.apk", "sha256": "<64 hex>", "label": "Example Resolver" },
+ *       "fdroid": true,
+ *       "downloader": { "code": "1234567" }
+ *     }
+ *
+ * `apk.url` must be a GitHub release asset (`https://github.com/<owner>/<repo>/releases/download/<tag>/<file>`); nothing else is
+ * ever downloaded. It is offered only for exactly `package`, and only handed to the installer if the file's sha256 matches.
+ * Three independent ways to get the app when it is not installed, each optional: `apk` (above); `fdroid: true` (the same
+ * `package` is listed in F-Droid: Kino opens F-Droid for exactly that package; the official F-Droid client has no real Android TV
+ * support, so on a TV prefer the others); `downloader.code` (3 to 10 digits: a Downloader code for TV sideloading, which Kino only
+ * SHOWS, with a button to open the Downloader app when it is installed). Kino offers only what the manifest declares for exactly
+ * `package`. With none of them (or if the stream names another package) a missing resolver just fails with "resolver not found".
+ * A stream's `external.resolver` overrides `package`; without either, any installed app declaring the protocol may be asked.
+ */
+interface KinoManifestExternalResolver {
+  package: string;
+  apk?: { url: string; sha256: string; label?: string };
+  /** Only `true` means anything: this `package` is listed in F-Droid. */
+  fdroid?: true;
+  /** A Downloader app code (3 to 10 digits) that fetches the app, for a TV. Shown, never installed by Kino. */
+  downloader?: { code: string };
+}

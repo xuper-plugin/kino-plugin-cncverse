@@ -1,10 +1,10 @@
 {
   "id": "cncverse",
   "name": "CNCVerse",
-  "version": "1.5.0",
+  "version": "2.0.0",
   "apiVersion": 9,
   "entry": "plugin.js",
-  "description": "Películas, series, anime, resúmenes y TV deportiva en vivo desde CNCVerse Bridge. Funciona al instalarlo, sin configurar nada.",
+  "description": "Puente al servidor CNCVerse (protocolo de Stremio): el servidor mantiene catálogos y fuentes, Kino solo los muestra.",
   "author": "xuper-plugin",
   "homepage": "https://github.com/xuper-plugin/kino-plugin-cncverse",
   "hosts": [
@@ -12,239 +12,101 @@
   ],
   "capabilities": [
     "search",
+    "scopedSearch",
     "home",
     "browse",
     "episodes",
     "resolve",
-    "download",
     "channels",
-    "scopedSearch"
+    "subtitles",
+    "download"
   ],
   "streamHosts": "any",
   "liveStreamHosts": "any",
   "categories": [
     "movies",
-    "series"
+    "series",
+    "live"
   ],
   "color": "#6F4FF5",
-  "telemetry": true,
   "settings": [
     {
-      "key": "accessSection",
-      "type": "section",
-      "label": "Acceso",
-      "labelEn": "Access"
-    },
-    {
-      "key": "address",
-      "type": "password",
-      "label": "Tu propio perfil (opcional)",
-      "labelEn": "Your own profile (optional)",
-      "hint": "Pega tu URL de CNCVerse para usar tu perfil.",
-      "hintEn": "Paste your CNCVerse URL to use your own profile."
-    },
-    {
-      "key": "playSection",
-      "type": "section",
-      "label": "Reproducción",
-      "labelEn": "Playback"
-    },
-    {
-      "key": "quality",
-      "type": "select",
-      "label": "Calidad preferida",
-      "labelEn": "Preferred quality",
-      "default": "1080",
-      "options": [
-        {
-          "value": "max",
-          "label": "La más alta (4K)",
-          "labelEn": "Highest (4K)"
-        },
-        {
-          "value": "1080",
-          "label": "Hasta 1080p",
-          "labelEn": "Up to 1080p"
-        },
-        {
-          "value": "720",
-          "label": "Hasta 720p",
-          "labelEn": "Up to 720p"
-        }
-      ]
-    },
-    {
-      "key": "maxSize",
-      "type": "select",
-      "label": "Tamaño máximo del archivo",
-      "labelEn": "Maximum file size",
-      "hint": "Los archivos más pesados pasan al final.",
-      "hintEn": "Heavier files go to the end.",
-      "default": "10",
-      "options": [
-        {
-          "value": "0",
-          "label": "Sin límite",
-          "labelEn": "No limit"
-        },
-        {
-          "value": "10",
-          "label": "10 GB",
-          "labelEn": "10 GB"
-        },
-        {
-          "value": "5",
-          "label": "5 GB",
-          "labelEn": "5 GB"
-        },
-        {
-          "value": "2.5",
-          "label": "2,5 GB",
-          "labelEn": "2.5 GB"
-        }
-      ]
-    },
-    {
-      "key": "sourcesSection",
-      "type": "section",
-      "label": "Fuentes",
-      "labelEn": "Sources"
-    },
-    {
-      "key": "otherLangs",
-      "type": "toggle",
-      "label": "Mostrar otros idiomas",
-      "labelEn": "Show other languages",
-      "hint": "Hindi, turco, francés… Por defecto solo español e inglés.",
-      "hintEn": "Hindi, Turkish, French… Spanish and English only by default.",
-      "default": false
-    },
-    {
-      "key": "sources",
-      "type": "text",
-      "label": "Fuentes de video",
-      "labelEn": "Video sources",
-      "default": "all",
-      "hint": "all, o por comas: HDHub4U, Kisskh, Movix, Re:ANIME…",
-      "hintEn": "all, or comma-separated: HDHub4U, Kisskh, Movix, Re:ANIME…"
-    },
-    {
-      "key": "searchIn",
-      "type": "select",
-      "label": "Buscar en",
-      "labelEn": "Search in",
-      "default": "all",
-      "options": [
-        {
-          "value": "all",
-          "label": "Todas las fuentes",
-          "labelEn": "All sources"
-        },
-        {
-          "value": "main",
-          "label": "Solo las principales (más rápido)",
-          "labelEn": "Main ones only (faster)"
-        }
-      ]
-    },
-    {
-      "key": "prefer",
-      "type": "select",
-      "label": "Preferir",
-      "labelEn": "Prefer",
-      "default": "file",
-      "options": [
-        {
-          "value": "file",
-          "label": "Archivo directo",
-          "labelEn": "Direct file"
-        },
-        {
-          "value": "hls",
-          "label": "HLS (listas)",
-          "labelEn": "HLS (playlists)"
-        }
-      ]
-    },
-    {
-      "key": "homeSection",
-      "type": "section",
-      "label": "Inicio",
-      "labelEn": "Home"
-    },
-    {
       "key": "homeRows",
-      "type": "toggle",
+      "type": "select",
       "label": "Filas en Inicio",
-      "labelEn": "Home rows",
-      "hint": "Lo último de algunas fuentes aparece en el Inicio de Kino.",
-      "hintEn": "The latest of some sources appears on Kino's Home.",
-      "default": true
+      "labelEn": "Rows on Home",
+      "default": "4",
+      "options": [
+        {
+          "value": "2",
+          "label": "2",
+          "labelEn": "2"
+        },
+        {
+          "value": "4",
+          "label": "4",
+          "labelEn": "4"
+        },
+        {
+          "value": "8",
+          "label": "8",
+          "labelEn": "8"
+        }
+      ],
+      "hint": "Cada fila es un catálogo del servidor. Menos filas cargan más rápido.",
+      "hintEn": "Each row is one of the server's catalogs. Fewer rows load faster."
     },
     {
-      "key": "liveSection",
+      "key": "sectionPage",
+      "type": "select",
+      "label": "Pestañas de la sección",
+      "labelEn": "Section tabs",
+      "default": "1",
+      "options": [
+        {
+          "value": "1",
+          "label": "Catálogos 1–8",
+          "labelEn": "Catalogs 1–8"
+        },
+        {
+          "value": "2",
+          "label": "Catálogos 9–16",
+          "labelEn": "Catalogs 9–16"
+        },
+        {
+          "value": "3",
+          "label": "Catálogos 17–24",
+          "labelEn": "Catalogs 17–24"
+        }
+      ],
+      "hint": "Ocho catálogos a la vez, con las secciones del servidor.",
+      "hintEn": "Eight catalogs at a time, with the server's own sections."
+    },
+    {
+      "key": "statusSection",
       "type": "section",
-      "label": "En vivo",
-      "labelEn": "Live"
+      "label": "Estado",
+      "labelEn": "Status"
     },
     {
-      "key": "hideUpcoming",
-      "type": "toggle",
-      "label": "Ocultar eventos próximos",
-      "labelEn": "Hide upcoming events",
-      "hint": "Los que aún no tienen señal.",
-      "hintEn": "The ones with no signal yet.",
-      "default": true
-    },
-    {
-      "key": "jioLangs",
-      "type": "text",
-      "label": "Idiomas de JioTV",
-      "labelEn": "JioTV languages",
-      "default": "English",
-      "hint": "Con «otros idiomas» activo: all o por comas (Hindi, Tamil…).",
-      "hintEn": "With «other languages» on: all or comma-separated (Hindi, Tamil…)."
-    },
-    {
-      "key": "toolsSection",
-      "type": "section",
-      "label": "Herramientas",
-      "labelEn": "Tools"
-    },
-    {
-      "key": "health",
+      "key": "serverStatus",
       "type": "status",
-      "label": "Estado del puente",
-      "labelEn": "Bridge status"
+      "label": "Servidor",
+      "labelEn": "Server"
     },
     {
-      "key": "cache",
-      "type": "status",
-      "label": "Caché",
-      "labelEn": "Cache"
-    },
-    {
-      "key": "probe",
+      "key": "checkConn",
       "type": "action",
-      "label": "Comprobar el puente",
-      "labelEn": "Check the bridge"
-    },
-    {
-      "key": "clearCache",
-      "type": "action",
-      "label": "Vaciar caché",
-      "labelEn": "Clear cache",
-      "confirm": "¿Vaciar la caché de listas y fichas?",
-      "confirmEn": "Clear the cache of lists and titles?"
+      "label": "Verificar conexión",
+      "labelEn": "Check connection"
     }
   ],
-  "secrets": {
-    "bridgeCode": "kino-sealed:v1:0mkle0flc-78CKwJzPS3h6oSbctKL_0Eht0lFEFpDXn-v8cC6-4vp_57IkkDx9V9WS1EHY85Oc390I33JkDI6-p_P2egUhhwaUk"
-  },
+  "telemetry": true,
   "section": {
     "label": "CNCVerse",
     "labelEn": "CNCVerse"
   },
+  "icon": "icon.png",
   "theme": {
     "accent": "#6F4FF5",
     "onAccent": "#FFFFFF",
