@@ -1,7 +1,7 @@
 {
   "id": "cncverse",
   "name": "CNCVerse",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "apiVersion": 9,
   "entry": "plugin.js",
   "description": "Puente al servidor CNCVerse (protocolo de Stremio): el servidor mantiene catálogos y fuentes, Kino solo los muestra.",
@@ -113,5 +113,32 @@
     "background": "#07050D",
     "surface": "#15111F",
     "highlight": "#C9BBFF"
+  },
+  "enhancements": {
+    "14": {
+      "capabilities": [
+        "screen"
+      ],
+      "screen": {
+        "label": "CNCVerse",
+        "labelEn": "CNCVerse",
+        "icon": "movie",
+        "menuOpens": "screen",
+        "opensFrom": [
+          "menu",
+          "settings"
+        ],
+        "settingsButton": {
+          "label": "Abrir CNCVerse",
+          "labelEn": "Open CNCVerse"
+        },
+        "settingsIn": "screen"
+      }
+    },
+    "19": {
+      "capabilities": [
+        "screen"
+      ]
+    }
   }
 }
