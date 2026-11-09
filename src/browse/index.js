@@ -3,7 +3,7 @@
 // - `open` reads no network: the active tab is drawn from its kept copy (skeletons if none) and the tabs that still need their
 //   rows become `pending` in the state.
 // - A timer (`every`, only while something is pending) loads ONE tab per tick, the active one first, with the section page the
-//   catalog already builds. Each tab is kept (kino.storage, 12 h) the moment it arrives, so a slow source never holds the others
+//   catalog already builds. Each tab is kept (kino.storage, 7 days) the moment it arrives, so a slow source never holds the others
 //   back and a later opening paints from the copy first.
 // - Tabs other than the active one are prefetched except on a TV (a weak box pays for every row it builds): there they load when
 //   selected.
@@ -14,7 +14,8 @@ import { makeMetaCache } from "./metaCache.js";
 
 const TAB_KEY = "browseTab";
 const SNAP_PREFIX = "browse1:";
-const SNAP_TTL_MS = 12 * 3600 * 1000;
+const SNAP_TTL_MS = 7 * 24 * 3600 * 1000; // a kept copy is drawn at once and the next tick refreshes it (`whole` stays false)
+const HOME_KEY = "home1"; // the rows home() keeps (plugin.js): the same ones the "inicio" tab shows
 const SNAP_MAX = 20 * 1024;
 const RECENT_KEY = "recent1";
 const RECENT_MAX = 12;
@@ -79,13 +80,22 @@ export function makeBrowse({ kino, loadTab, searchTitles, live = null, warm = nu
     }
   }
 
+  /** The "inicio" tab has the very rows home() keeps: with no copy of its own it is drawn from those, then refreshed. */
+  function homeSeed(tab) {
+    if (tab !== "inicio") return null;
+    try {
+      const o = JSON.parse(get(HOME_KEY) || "null");
+      return o && Array.isArray(o.rows) && o.rows.length ? tabOf({ rows: o.rows }) : null;
+    } catch (_) { return null; }
+  }
+
   const stored = () => { const t = get(TAB_KEY); return TAB_IDS.includes(t) ? t : null; };
   const remember = (tab) => set(TAB_KEY, tab);
 
   /** [tab]'s data for drawing: this sandbox's, else its kept copy (not "whole": the next tick refreshes it). */
   function dataOf(tab) {
     if (memo.has(tab)) return memo.get(tab).data;
-    const snap = readSnap(tab);
+    const snap = readSnap(tab) || homeSeed(tab);
     if (snap) { memo.set(tab, { data: snap, whole: false }); return snap; }
     return null;
   }

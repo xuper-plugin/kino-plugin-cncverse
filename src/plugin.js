@@ -330,9 +330,63 @@ function qualityOf(text) {
   return undefined;
 }
 
+// A catalog's answer is also kept in storage (survives the sandbox): fresh for 10 min, the old copy serves up to 24 h when the network fails.
+const CM_PREFIX = "cm1:";
+const CM_INDEX = "cm1idx";
+const CM_ENTRY_MAX = 48 * 1024;
+const CM_TOTAL_MAX = 130 * 1024; // storage (256 KB) is shared with the manifest, Home's copy, the screen's tabs and the caches
+const CM_STALE_MS = 24 * 3600 * 1000;
+
+function cmRead(key) {
+  try {
+    const o = JSON.parse(kino.storage.get(key) || "null");
+    return o && typeof o.at === "number" && o.v ? o : null;
+  } catch { return null; }
+}
+
+function cmWrite(key, v, path) {
+  try {
+    const text = JSON.stringify({ at: Date.now(), p: path, v });
+    if (text.length > CM_ENTRY_MAX) return;
+    let idx;
+    try { idx = JSON.parse(kino.storage.get(CM_INDEX) || "[]"); } catch { idx = []; }
+    idx = (Array.isArray(idx) ? idx : []).filter((e) => e && e.k !== key && typeof e.k === "string");
+    idx.push({ k: key, at: Date.now(), n: text.length });
+    idx.sort((a, b) => a.at - b.at);
+    let total = idx.reduce((n, e) => n + (e.n || 0), 0);
+    while (idx.length > 1 && total > CM_TOTAL_MAX) {
+      const old = idx.shift();
+      total -= old.n || 0;
+      try { kino.storage.set(old.k, "", { ttlMs: 1 }); } catch { /* it expires anyway */ }
+    }
+    kino.storage.set(key, text, { ttlMs: CM_STALE_MS });
+    kino.storage.set(CM_INDEX, JSON.stringify(idx), { ttlMs: CM_STALE_MS });
+  } catch { /* full storage: only the memory copy */ }
+}
+
+async function catalogData(path, timeoutMs) {
+  const mem = MEM.get(path);
+  if (mem && Date.now() - mem.at < TTL_PAGE) return mem.v;
+  const key = CM_PREFIX + hash(path);
+  const kept = cmRead(key);
+  if (kept && kept.p === path && Date.now() - kept.at < TTL_PAGE) {
+    MEM.set(path, { at: kept.at, v: kept.v });
+    return kept.v;
+  }
+  try {
+    const v = await getJson(path, timeoutMs || 12000);
+    MEM.set(path, { at: Date.now(), v });
+    if (v && Array.isArray(v.metas)) cmWrite(key, v, path);
+    return v;
+  } catch (e) {
+    if (kept && kept.p === path && Date.now() - kept.at < CM_STALE_MS) return kept.v;
+    throw e;
+  }
+}
+
 async function catalogMetas(cat, extras, timeoutMs) {
   const path = catalogPath(cat, extras);
-  const data = await cachedMem(path, TTL_PAGE, () => getJson(path, timeoutMs || 12000));
+  const data = await catalogData(path, timeoutMs);
   return Array.isArray(data && data.metas) ? data.metas.filter((m) => m && typeof m.id === "string") : [];
 }
 
@@ -470,10 +524,41 @@ async function homeLiveRows(manifest) {
   return rows.filter(Boolean);
 }
 
+// Home's rows (not the live ones) are kept: the browse screen's Inicio paints from them, and Home itself answers with them when the network fails.
+const HOME_KEY = "home1";
+const HOME_MAX = 60 * 1024;
+const HOME_TTL_MS = 7 * 24 * 3600 * 1000;
+
+function saveHome(rows) {
+  try {
+    if (!rows.length) return;
+    for (let per = 12; per >= 2; per -= 2) {
+      const text = JSON.stringify({ at: Date.now(), rows: rows.map((r) => ({ ...r, items: r.items.slice(0, per) })) });
+      if (text.length <= HOME_MAX) { kino.storage.set(HOME_KEY, text, { ttlMs: HOME_TTL_MS }); return; }
+    }
+  } catch { /* full storage: no copy */ }
+}
+
+function savedHome() {
+  try {
+    const o = JSON.parse(kino.storage.get(HOME_KEY) || "null");
+    return o && Array.isArray(o.rows) && o.rows.length ? o.rows : null;
+  } catch { return null; }
+}
+
 export async function home() {
-  const manifest = await loadManifest(false);
-  const [live, rows] = await Promise.all([homeLiveRows(manifest).catch(() => []), homeRows(manifest)]);
-  return live.concat(rows);
+  let rows = [];
+  let live = [];
+  let failure = null;
+  try {
+    const manifest = await loadManifest(false);
+    [live, rows] = await Promise.all([homeLiveRows(manifest).catch(() => []), homeRows(manifest)]);
+  } catch (e) { failure = e; }
+  if (rows.length) { saveHome(rows); return live.concat(rows); }
+  const kept = savedHome();
+  if (kept) return live.concat(kept);
+  if (failure) throw failure;
+  return live;
 }
 
 // ---- the server's sections as the plugin's own section: one tab per catalog, one row per section of that catalog

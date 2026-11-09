@@ -1,7 +1,7 @@
 {
   "id": "cncverse",
   "name": "CNCVerse",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "apiVersion": 9,
   "entry": "plugin.js",
   "description": "Puente al servidor CNCVerse (protocolo de Stremio): el servidor mantiene catálogos y fuentes, Kino solo los muestra.",

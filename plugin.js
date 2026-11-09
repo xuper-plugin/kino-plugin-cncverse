@@ -431,7 +431,8 @@ function makeMetaCache({ kino: kino2, clock = { now: () => Date.now() } }) {
 // src/browse/index.js
 var TAB_KEY = "browseTab";
 var SNAP_PREFIX = "browse1:";
-var SNAP_TTL_MS = 12 * 3600 * 1e3;
+var SNAP_TTL_MS = 7 * 24 * 3600 * 1e3;
+var HOME_KEY = "home1";
 var SNAP_MAX = 20 * 1024;
 var RECENT_KEY = "recent1";
 var RECENT_MAX = 12;
@@ -504,6 +505,15 @@ function makeBrowse({ kino: kino2, loadTab, searchTitles, live = null, warm = nu
       }
     }
   }
+  function homeSeed(tab) {
+    if (tab !== "inicio") return null;
+    try {
+      const o = JSON.parse(get(HOME_KEY) || "null");
+      return o && Array.isArray(o.rows) && o.rows.length ? tabOf({ rows: o.rows }) : null;
+    } catch (_) {
+      return null;
+    }
+  }
   const stored = () => {
     const t2 = get(TAB_KEY);
     return TAB_IDS.includes(t2) ? t2 : null;
@@ -511,7 +521,7 @@ function makeBrowse({ kino: kino2, loadTab, searchTitles, live = null, warm = nu
   const remember2 = (tab) => set(TAB_KEY, tab);
   function dataOf(tab) {
     if (memo.has(tab)) return memo.get(tab).data;
-    const snap = readSnap(tab);
+    const snap = readSnap(tab) || homeSeed(tab);
     if (snap) {
       memo.set(tab, { data: snap, whole: false });
       return snap;
@@ -884,13 +894,6 @@ async function pool(list, limit, fn) {
 }
 var MEM = /* @__PURE__ */ new Map();
 var TTL_PAGE = 10 * 60 * 1e3;
-async function cachedMem(key, ttl, fn) {
-  const hit = MEM.get(key);
-  if (hit && Date.now() - hit.at < ttl) return hit.v;
-  const v = await fn();
-  MEM.set(key, { at: Date.now(), v });
-  return v;
-}
 var MANIFEST_KEY = "m2";
 var TTL_MANIFEST = 60 * 60 * 1e3;
 function normalizeManifest(m) {
@@ -1068,9 +1071,68 @@ function qualityOf(text) {
   for (const q of ["1080p", "720p", "480p"]) if (s.toLowerCase().includes(q)) return q;
   return void 0;
 }
+var CM_PREFIX = "cm1:";
+var CM_INDEX = "cm1idx";
+var CM_ENTRY_MAX = 48 * 1024;
+var CM_TOTAL_MAX = 130 * 1024;
+var CM_STALE_MS = 24 * 3600 * 1e3;
+function cmRead(key) {
+  try {
+    const o = JSON.parse(kino.storage.get(key) || "null");
+    return o && typeof o.at === "number" && o.v ? o : null;
+  } catch {
+    return null;
+  }
+}
+function cmWrite(key, v, path) {
+  try {
+    const text = JSON.stringify({ at: Date.now(), p: path, v });
+    if (text.length > CM_ENTRY_MAX) return;
+    let idx;
+    try {
+      idx = JSON.parse(kino.storage.get(CM_INDEX) || "[]");
+    } catch {
+      idx = [];
+    }
+    idx = (Array.isArray(idx) ? idx : []).filter((e) => e && e.k !== key && typeof e.k === "string");
+    idx.push({ k: key, at: Date.now(), n: text.length });
+    idx.sort((a, b) => a.at - b.at);
+    let total = idx.reduce((n, e) => n + (e.n || 0), 0);
+    while (idx.length > 1 && total > CM_TOTAL_MAX) {
+      const old = idx.shift();
+      total -= old.n || 0;
+      try {
+        kino.storage.set(old.k, "", { ttlMs: 1 });
+      } catch {
+      }
+    }
+    kino.storage.set(key, text, { ttlMs: CM_STALE_MS });
+    kino.storage.set(CM_INDEX, JSON.stringify(idx), { ttlMs: CM_STALE_MS });
+  } catch {
+  }
+}
+async function catalogData(path, timeoutMs) {
+  const mem = MEM.get(path);
+  if (mem && Date.now() - mem.at < TTL_PAGE) return mem.v;
+  const key = CM_PREFIX + hash(path);
+  const kept = cmRead(key);
+  if (kept && kept.p === path && Date.now() - kept.at < TTL_PAGE) {
+    MEM.set(path, { at: kept.at, v: kept.v });
+    return kept.v;
+  }
+  try {
+    const v = await getJson(path, timeoutMs || 12e3);
+    MEM.set(path, { at: Date.now(), v });
+    if (v && Array.isArray(v.metas)) cmWrite(key, v, path);
+    return v;
+  } catch (e) {
+    if (kept && kept.p === path && Date.now() - kept.at < CM_STALE_MS) return kept.v;
+    throw e;
+  }
+}
 async function catalogMetas(cat, extras, timeoutMs) {
   const path = catalogPath(cat, extras);
-  const data = await cachedMem(path, TTL_PAGE, () => getJson(path, timeoutMs || 12e3));
+  const data = await catalogData(path, timeoutMs);
   return Array.isArray(data && data.metas) ? data.metas.filter((m) => m && typeof m.id === "string") : [];
 }
 function card(m, cat) {
@@ -1188,10 +1250,48 @@ async function homeLiveRows(manifest) {
   });
   return rows.filter(Boolean);
 }
+var HOME_KEY2 = "home1";
+var HOME_MAX = 60 * 1024;
+var HOME_TTL_MS = 7 * 24 * 3600 * 1e3;
+function saveHome(rows) {
+  try {
+    if (!rows.length) return;
+    for (let per = 12; per >= 2; per -= 2) {
+      const text = JSON.stringify({ at: Date.now(), rows: rows.map((r) => ({ ...r, items: r.items.slice(0, per) })) });
+      if (text.length <= HOME_MAX) {
+        kino.storage.set(HOME_KEY2, text, { ttlMs: HOME_TTL_MS });
+        return;
+      }
+    }
+  } catch {
+  }
+}
+function savedHome() {
+  try {
+    const o = JSON.parse(kino.storage.get(HOME_KEY2) || "null");
+    return o && Array.isArray(o.rows) && o.rows.length ? o.rows : null;
+  } catch {
+    return null;
+  }
+}
 async function home() {
-  const manifest = await loadManifest(false);
-  const [live, rows] = await Promise.all([homeLiveRows(manifest).catch(() => []), homeRows(manifest)]);
-  return live.concat(rows);
+  let rows = [];
+  let live = [];
+  let failure = null;
+  try {
+    const manifest = await loadManifest(false);
+    [live, rows] = await Promise.all([homeLiveRows(manifest).catch(() => []), homeRows(manifest)]);
+  } catch (e) {
+    failure = e;
+  }
+  if (rows.length) {
+    saveHome(rows);
+    return live.concat(rows);
+  }
+  const kept = savedHome();
+  if (kept) return live.concat(kept);
+  if (failure) throw failure;
+  return live;
 }
 var SECTION_TABS = 8;
 var SECTION_ROWS = 12;

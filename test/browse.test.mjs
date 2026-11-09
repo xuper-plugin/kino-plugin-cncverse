@@ -249,3 +249,13 @@ test("metadata is asked for the name without its brackets, with the year", async
   assert.deepEqual(metaAsk({ id: "a", title: "Kick (2023)", kind: "movie" }), { id: "a", title: "Kick", kind: "movie", year: 2023 });
   assert.deepEqual(metaAsk({ id: "b", title: "DARK (Season 1)", kind: "series" }), { id: "b", title: "DARK", kind: "series" });
 });
+
+test("Inicio paints from the rows home() kept (home1) when it has no copy of its own", async () => {
+  const kino = fakeKino();
+  kino.store.set("home1", JSON.stringify({ at: Date.now(), rows: pageOf("inicio").rows }));
+  const h = harness({ kino });
+  const r = await h.render();
+  assert.ok(!types(r.tree).includes("skeleton"), "no skeletons: the kept rows are drawn");
+  assert.ok(types(r.tree).includes("titleRail"));
+  assert.deepEqual(h.loaded, [], "nothing was loaded to draw it");
+});
