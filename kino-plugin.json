@@ -1,10 +1,10 @@
 {
   "id": "cncverse",
   "name": "CNCVerse",
-  "version": "2.1.2",
-  "apiVersion": 9,
+  "version": "2.2.0",
+  "apiVersion": 19,
   "entry": "plugin.js",
-  "description": "Puente al servidor CNCVerse (protocolo de Stremio): el servidor mantiene catálogos y fuentes, Kino solo los muestra.",
+  "description": "Puente al servidor CNCVerse (protocolo de Stremio): el servidor mantiene catálogos y fuentes, Kino solo los muestra. Elige tus catálogos, busca al instante y las fuentes que fallan se pausan solas.",
   "author": "xuper-plugin",
   "homepage": "https://github.com/xuper-plugin/kino-plugin-cncverse",
   "hosts": [
@@ -19,7 +19,9 @@
     "resolve",
     "channels",
     "subtitles",
-    "download"
+    "download",
+    "screen",
+    "catalog"
   ],
   "streamHosts": "any",
   "liveStreamHosts": "any",
@@ -83,6 +85,101 @@
       "hintEn": "Eight catalogs at a time, with the server's own sections."
     },
     {
+      "key": "srcMode",
+      "type": "select",
+      "label": "Qué catálogos usar",
+      "labelEn": "Which catalogs to use",
+      "default": "all",
+      "options": [
+        {
+          "value": "all",
+          "label": "Todos",
+          "labelEn": "All"
+        },
+        {
+          "value": "custom",
+          "label": "Los que elijo (lista Fuentes)",
+          "labelEn": "The ones I pick (Sources list)"
+        }
+      ],
+      "hint": "Elige uno a uno en la lista Fuentes de esta pantalla.",
+      "hintEn": "Pick them one by one in the Sources list on this page."
+    },
+    {
+      "key": "quality",
+      "type": "select",
+      "label": "Calidad preferida",
+      "labelEn": "Preferred quality",
+      "default": "1080",
+      "options": [
+        {
+          "value": "max",
+          "label": "La más alta (4K)",
+          "labelEn": "Highest (4K)"
+        },
+        {
+          "value": "1080",
+          "label": "Hasta 1080p",
+          "labelEn": "Up to 1080p"
+        },
+        {
+          "value": "720",
+          "label": "Hasta 720p",
+          "labelEn": "Up to 720p"
+        }
+      ]
+    },
+    {
+      "key": "maxSize",
+      "type": "select",
+      "label": "Tamaño máximo del archivo",
+      "labelEn": "Maximum file size",
+      "default": "10",
+      "hint": "Los archivos más pesados pasan al final.",
+      "hintEn": "Heavier files go to the end.",
+      "options": [
+        {
+          "value": "0",
+          "label": "Sin límite",
+          "labelEn": "No limit"
+        },
+        {
+          "value": "10",
+          "label": "10 GB",
+          "labelEn": "10 GB"
+        },
+        {
+          "value": "5",
+          "label": "5 GB",
+          "labelEn": "5 GB"
+        },
+        {
+          "value": "2.5",
+          "label": "2,5 GB",
+          "labelEn": "2.5 GB"
+        }
+      ]
+    },
+    {
+      "key": "prefer",
+      "type": "select",
+      "label": "Preferir",
+      "labelEn": "Prefer",
+      "default": "file",
+      "options": [
+        {
+          "value": "file",
+          "label": "Archivo directo",
+          "labelEn": "Direct file"
+        },
+        {
+          "value": "hls",
+          "label": "HLS (listas)",
+          "labelEn": "HLS (playlists)"
+        }
+      ]
+    },
+    {
       "key": "statusSection",
       "type": "section",
       "label": "Estado",
@@ -95,10 +192,44 @@
       "labelEn": "Server"
     },
     {
+      "key": "sources",
+      "type": "status",
+      "label": "Catálogos",
+      "labelEn": "Catalogs"
+    },
+    {
+      "key": "index",
+      "type": "status",
+      "label": "Índice de búsqueda",
+      "labelEn": "Search index"
+    },
+    {
       "key": "checkConn",
       "type": "action",
       "label": "Verificar conexión",
       "labelEn": "Check connection"
+    },
+    {
+      "key": "resume",
+      "type": "action",
+      "label": "Reanudar catálogos en pausa",
+      "labelEn": "Resume paused catalogs"
+    },
+    {
+      "key": "clearIndex",
+      "type": "action",
+      "label": "Vaciar índice de búsqueda",
+      "labelEn": "Clear the search index",
+      "confirm": "¿Vaciar el índice de búsqueda? Se vuelve a llenar usando el plugin.",
+      "confirmEn": "Clear the search index? It fills up again as you use the plugin."
+    },
+    {
+      "key": "clearCache",
+      "type": "action",
+      "label": "Vaciar caché",
+      "labelEn": "Clear cache",
+      "confirm": "¿Vaciar la caché de listas y fichas?",
+      "confirmEn": "Clear the cache of lists and titles?"
     }
   ],
   "telemetry": true,
@@ -114,31 +245,19 @@
     "surface": "#15111F",
     "highlight": "#C9BBFF"
   },
-  "enhancements": {
-    "14": {
-      "capabilities": [
-        "screen"
-      ],
-      "screen": {
-        "label": "CNCVerse",
-        "labelEn": "CNCVerse",
-        "icon": "movie",
-        "menuOpens": "screen",
-        "opensFrom": [
-          "menu",
-          "settings"
-        ],
-        "settingsButton": {
-          "label": "Abrir CNCVerse",
-          "labelEn": "Open CNCVerse"
-        },
-        "settingsIn": "screen"
-      }
+  "screen": {
+    "label": "CNCVerse",
+    "labelEn": "CNCVerse",
+    "icon": "movie",
+    "menuOpens": "screen",
+    "opensFrom": [
+      "menu",
+      "settings"
+    ],
+    "settingsButton": {
+      "label": "Abrir CNCVerse",
+      "labelEn": "Open CNCVerse"
     },
-    "19": {
-      "capabilities": [
-        "screen"
-      ]
-    }
+    "settingsIn": "screen"
   }
 }

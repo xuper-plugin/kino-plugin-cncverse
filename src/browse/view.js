@@ -1,6 +1,6 @@
 // The browse screen's trees: a pure view of what index.js holds. A tab that is not in yet draws skeletons shaped like what
 // will replace them, so nothing jumps when the rows arrive. Every text is in both languages.
-import { both } from "./words.js";
+import { both, fill } from "./words.js";
 import { TAB_IDS } from "./model.js";
 import { LOGO_DATA, LOGO_ASPECT } from "./logo.js";
 
@@ -168,11 +168,43 @@ export function browseView({ tab, data, recent, live = [], pending, failed, devi
   };
 }
 
+// What a source's line says: off, paused (and for how long), slow, fine or not measured, in both languages.
+function sourceStatus(x) {
+  const parts = (l) => {
+    const out = [];
+    if (!x.on) out.push(both("brSrcOff")[l]);
+    else if (x.pausedMin > 0) out.push(fill("brSrcPaused", { min: x.pausedMin })[l]);
+    else if (!x.ms) out.push(both("brSrcNew")[l]);
+    else out.push(both(x.ms > 8000 ? "brSrcSlow" : "brSrcOk")[l] + " · " + (x.ms / 1000).toFixed(1) + " s");
+    if (x.live) out.push(both("brSrcLive")[l]);
+    return out.join(" · ");
+  };
+  return { text: parts("es"), textEn: parts("en") };
+}
+
+/** One switch per catalog of the server, with how it is doing; the person picks which ones the plugin uses. */
+function sourcesBlock(sources) {
+  if (!Array.isArray(sources) || sources.length === 0) return [];
+  return [{
+    type: "Column", key: "sources", gap: 12, children: [
+      { type: "Text", key: "srcTitle", style: "h4", ...twin("brSources") },
+      { type: "Text", key: "srcHelp", color: "muted", ...twin("brSourcesHelp") },
+      ...sources.slice(0, 60).map((x) => ({
+        type: "Column", key: "src-" + x.key, gap: 4, children: [
+          { type: "Switch", key: "sw-" + x.key, labelText: x.title, labelTextEn: x.title, value: x.on, onChanged: { event: "toggleSource", arg: x.id } },
+          { type: "Text", key: "st-" + x.key, color: "muted", ...sourceStatus(x) },
+        ],
+      })),
+      { type: "Divider", key: "srcEnd" },
+    ],
+  }];
+}
+
 /**
  * The settings page (route "settings"): the same one bar, then Kino's own form of the plugin's settings (language and quality,
  * sources, the test and clear actions). `back` pops to the browse screen, or closes when the page was opened on its own.
  */
-export function settingsView() {
+export function settingsView({ sources = [] } = {}) {
   return {
     type: "Scaffold",
     appBar: {
@@ -180,7 +212,7 @@ export function settingsView() {
       leading: { type: "IconButton", key: "back", icon: "arrow_back", ...twin("brBack", "labelText"), ...twin("brBack", "tooltip"), onPressed: "back" },
       title: logo(),
     },
-    body: { type: "SingleChildScrollView", key: "settings-page", children: [{ type: "Column", padding: { compact: 12, expanded: 24 }, gap: 16, children: [{ type: "settings", key: "form" }] }] },
+    body: { type: "SingleChildScrollView", key: "settings-page", children: [{ type: "Column", padding: { compact: 12, expanded: 24 }, gap: 16, children: [...sourcesBlock(sources), { type: "settings", key: "form", onSaved: "settingsSaved" }] }] },
   };
 }
 

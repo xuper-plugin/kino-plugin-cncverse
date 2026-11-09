@@ -7,6 +7,10 @@
 //                        9. live channels  10. subtitles  11. settings
 
 import { makeBrowse } from "./browse/index.js";
+import { makeBudget, withTime } from "./robust/budget.js";
+import { byLatency, forgetAll, healthyOnly, isOn, isPaused, noteCatalog, noteLatency, pausedFor, readBreaker, readHealth, readLatency, readPicks, recordHealth, resetBreaker, sourceMode, writePicks } from "./robust/store.js";
+import { clearIndex, indexGet, indexItems, indexRemove, indexSize, searchIndex } from "./robust/index.js";
+import { rank } from "./robust/rank.js";
 
 const BASE = "https://cncverse.dpdns.org";
 
@@ -32,6 +36,14 @@ const TEXTS = {
     offline: "Sin conexión: {detail}",
     online: "Conectado: {catalogs} catálogos",
     movieEpisode: "Película",
+    warming: "El servidor está preparando esta lista. Vuelve a abrirla en un momento.",
+    warmingVideo: "El servidor está buscando el video (puede tardar la primera vez). Vuelve a intentarlo en un momento.",
+    revoked: "El servidor ya no atiende esta dirección.",
+    indexStatus: "{n} títulos",
+    sourcesStatus: "{on} activos de {all}, {paused} en pausa",
+    resumed: "Listo: los catálogos en pausa vuelven a intentarse",
+    indexCleared: "Listo: se vació el índice de búsqueda",
+    cacheCleared: "Listo: se vació la caché",
   },
   en: {
     timeout: "The server isn't responding. Try again in a moment.",
@@ -52,6 +64,14 @@ const TEXTS = {
     offline: "Offline: {detail}",
     online: "Connected: {catalogs} catalogs",
     movieEpisode: "Movie",
+    warming: "The server is preparing this list. Open it again in a moment.",
+    warmingVideo: "The server is looking for the video (it can take a while the first time). Try again in a moment.",
+    revoked: "The server no longer serves this address.",
+    indexStatus: "{n} titles",
+    sourcesStatus: "{on} on of {all}, {paused} paused",
+    resumed: "Done: paused catalogs will be tried again",
+    indexCleared: "Done: the search index is empty",
+    cacheCleared: "Done: the cache is empty",
   },
 };
 
@@ -72,7 +92,18 @@ function route(path) {
   return path.split("/").slice(0, 3).join("/");
 }
 
-async function getJson(path, timeoutMs) {
+// Two callers asking the same path at once (a warm-up and the real call, Home and the screen) share one request.
+const INFLIGHT = new Map();
+
+function getJson(path, timeoutMs) {
+  const shared = INFLIGHT.get(path);
+  if (shared) return shared;
+  const p = fetchJson(path, timeoutMs).finally(() => INFLIGHT.delete(path));
+  INFLIGHT.set(path, p);
+  return p;
+}
+
+async function fetchJson(path, timeoutMs) {
   let r;
   try {
     r = await kino.fetch(BASE + path, { timeoutMs: timeoutMs || 12000 });
@@ -151,18 +182,31 @@ function normalizeManifest(m) {
   return { resources, catalogs };
 }
 
-async function loadManifest(fresh) {
-  let stale = null;
+function staleManifest() {
   try {
     const raw = kino.storage.get(MANIFEST_KEY);
-    if (raw) stale = JSON.parse(raw);
-  } catch { /* unreadable: refetch */ }
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; /* unreadable: refetch */ }
+}
+
+/** The last manifest kept, whatever its age, without waiting for anything (the screen draws from it). */
+export function manifestNow() {
+  const s = staleManifest();
+  return s && s.v && Array.isArray(s.v.catalogs) ? s.v : null;
+}
+
+// [capMs]: the longest this read may take. With an older copy to fall back on a slow server is not waited for (6 s); with none the
+// first read gets up to 12 s. Either way it stays inside Kino's 20 s together with what the caller does next.
+async function loadManifest(fresh, capMs) {
+  const stale = staleManifest();
   if (!fresh && stale && Date.now() - stale.at < TTL_MANIFEST) return stale.v;
   try {
-    const v = normalizeManifest(await getJson("/manifest.json", 15000));
+    const v = normalizeManifest(await getJson("/manifest.json", capMs || (stale && !fresh ? 6000 : 12000)));
     try { kino.storage.set(MANIFEST_KEY, JSON.stringify({ at: Date.now(), v })); } catch { /* storage full: not cached */ }
+    recordHealth(true);
     return v;
   } catch (e) {
+    recordHealth(false);
     if (stale && !fresh) return stale.v; // the server hiccuped: the last manifest still works
     throw e;
   }
@@ -209,12 +253,58 @@ function remember(key, name, isSeries, year) {
 }
 
 function flushKinds() {
+  flushCats();
   if (!KINDS_DIRTY) return;
   const k = kinds();
   const keys = Object.keys(k);
   for (let i = 0; i < keys.length - MAX_KINDS; i++) delete k[keys[i]];
   try { kino.storage.set(KINDS_KEY, JSON.stringify(k), { ttlMs: TTL_KINDS }); } catch { /* storage full: not cached */ }
   KINDS_DIRTY = false;
+}
+
+// Which catalog a title came from, so a failed play can be charged to that catalog's breaker and its copy looked for in the others.
+// Compact on purpose: the first eight characters of the card key and the position of the catalog id in a short list.
+const CATS_KEY = "rb_cats";
+const MAX_CATS = 600;
+let CATS = null;
+let CATS_DIRTY = false;
+
+function catsMemo() {
+  if (!CATS) {
+    try { CATS = JSON.parse(kino.storage.get(CATS_KEY) || "null"); } catch { CATS = null; }
+    if (!CATS || !Array.isArray(CATS.c) || typeof CATS.m !== "object" || !CATS.m) CATS = { c: [], m: {} };
+  }
+  return CATS;
+}
+
+function noteCatOf(cardKey, catId) {
+  const memo = catsMemo();
+  let i = memo.c.indexOf(catId);
+  if (i < 0) {
+    if (memo.c.length >= 200) return;
+    i = memo.c.push(catId) - 1;
+  }
+  const k = cardKey.slice(0, 9);
+  if (memo.m[k] === i) return;
+  delete memo.m[k];
+  memo.m[k] = i;
+  CATS_DIRTY = true;
+}
+
+/** The id of the catalog a card key came from, "" when not known. */
+function catOfKey(cardKey) {
+  const memo = catsMemo();
+  const i = memo.m[cardKey.slice(0, 9)];
+  return Number.isInteger(i) && memo.c[i] ? memo.c[i] : "";
+}
+
+function flushCats() {
+  if (!CATS_DIRTY) return;
+  const memo = catsMemo();
+  const keys = Object.keys(memo.m);
+  for (let i = 0; i < keys.length - MAX_CATS; i++) delete memo.m[keys[i]];
+  try { kino.storage.set(CATS_KEY, JSON.stringify(memo), { ttlMs: TTL_KINDS }); } catch { /* storage full: not kept */ }
+  CATS_DIRTY = false;
 }
 
 // ---- 5. items ----------------------------------------------------------------------------------------------------
@@ -300,6 +390,7 @@ function seriesInfo(meta) {
 
 const PAGE = 100; // Stremio's page size for `skip`
 const DEADLINE_MS = 9000;
+const HOME_BUDGET_MS = 15500; // Kino cuts Home at 20 s: the manifest, the rows and the live rows share this
 const ENRICH_BUDGET = 24;
 
 function catalogPath(cat, extras) {
@@ -396,7 +487,8 @@ function card(m, cat) {
   const key = "n" + hash(m.id);
   const known = kinds()[key];
   const name = !BLANK.test(String(m.name || "")) ? String(m.name) : known ? known[0] : "";
-  return { m, type, key, name, series: known ? known[1] === 1 : undefined, overview: undefined, genres: undefined };
+  noteCatOf(key, cat.id);
+  return { m, type, key, name, series: known ? known[1] === 1 : undefined, overview: undefined, genres: undefined, cat: cat.id };
 }
 
 function needsMeta(c) {
@@ -409,8 +501,9 @@ function needsMeta(c) {
 async function enrich(cards, budget, deadline) {
   const todo = cards.filter(needsMeta).sort((a, b) => needsMeta(b) - needsMeta(a)).slice(0, budget);
   await pool(todo, 5, async (c) => {
-    if (Date.now() > deadline) return;
-    const meta = (await getJson(`/meta/${enc(c.type)}/${enc(c.m.id)}.json`, 8000)).meta;
+    const room = deadline - Date.now();
+    if (room < 1500) return;
+    const meta = (await getJson(`/meta/${enc(c.type)}/${enc(c.m.id)}.json`, Math.min(8000, room))).meta;
     if (!meta) return;
     const isSeries = Array.isArray(meta.videos) && meta.videos.length > 0;
     if (!c.name && !BLANK.test(String(meta.name || ""))) c.name = String(meta.name);
@@ -458,11 +551,17 @@ async function itemsOf(metas, cat, budget, deadline, adult) {
     seen.add(item.id);
     items.push(item);
   }
+  await indexItems(items, cat.id);
   return items;
 }
 
 function browseCatalogs(manifest) {
-  return manifest.catalogs.filter((c) => c.browsable && !isLiveType(c.type));
+  return manifest.catalogs.filter((c) => c.browsable && !isLiveType(c.type) && isOn(c));
+}
+
+/** Home's and the catalogs tab's catalogs: the ones that are on and not failing to deliver titles (all of them when every one is). */
+function shownCatalogs(manifest) {
+  return healthyOnly(browseCatalogs(manifest), "play");
 }
 
 function rowsSetting() {
@@ -487,6 +586,7 @@ async function buildRows(specs, deadline) {
     const items = cards.map(toItem).filter(Boolean);
     if (adult) items.forEach((item) => { item.adult = true; });
     if (!items.length) continue;
+    await indexItems(items, cat.id);
     rows.push({
       id: "r" + safeId(cat.id).slice(0, 80) + (genre ? "-" + hash(genre).slice(0, 8) : ""),
       title: (genre || catalogTitle(cat)).slice(0, 100),
@@ -498,19 +598,21 @@ async function buildRows(specs, deadline) {
   return rows;
 }
 
-async function homeRows(manifest) {
-  const cats = browseCatalogs(manifest).slice(0, rowsSetting());
-  const deadline = Date.now() + DEADLINE_MS;
-  const pages = await pool(cats, 5, async (cat) => (await catalogMetas(cat, "", 10000)).slice(0, 12));
-  return buildRows(cats.map((cat, i) => ({ cat, genre: null, metas: pages[i] })), deadline);
+async function homeRows(manifest, budget) {
+  const cats = shownCatalogs(manifest).slice(0, rowsSetting());
+  const b = budget || makeBudget(HOME_BUDGET_MS);
+  const pages = await pool(cats, 5, async (cat) => (b.short(2500) ? [] : (await catalogMetas(cat, "", b.cap(10000, 200))).slice(0, 12)));
+  return buildRows(cats.map((cat, i) => ({ cat, genre: null, metas: pages[i] })), Math.min(b.end, Date.now() + DEADLINE_MS));
 }
 
 /** A row of live channels for each live catalog that has something playable: the first two, at most. */
-async function homeLiveRows(manifest) {
-  const cats = (await playableLiveCatalogs(manifest)).slice(0, 2);
+async function homeLiveRows(manifest, budget) {
+  const b = budget || makeBudget(HOME_BUDGET_MS);
+  const cats = (await playableLiveCatalogs(manifest, b)).slice(0, 2);
   const rows = await pool(cats, 2, async (cat) => {
+    if (b.short(2500)) return null;
     const taken = new Set();
-    const items = (await catalogMetas(cat, "", 15000))
+    const items = (await catalogMetas(cat, "", b.cap(15000, 200)))
       .slice(0, 12)
       .map((m) => channelOf(m, cat, safeId(cat.id), taken))
       .filter(Boolean)
@@ -542,7 +644,12 @@ function saveHome(rows) {
 function savedHome() {
   try {
     const o = JSON.parse(kino.storage.get(HOME_KEY) || "null");
-    return o && Array.isArray(o.rows) && o.rows.length ? o.rows : null;
+    const rows = o && Array.isArray(o.rows) ? o.rows : [];
+    // Only the rows of catalogs that are still on (the person may have switched one off since the copy was kept).
+    const m = manifestNow();
+    const on = m ? m.catalogs.filter(isOn).map((c) => "r" + safeId(c.id).slice(0, 80)) : null;
+    const kept = on ? rows.filter((r) => typeof r.id === "string" && on.some((p) => r.id.startsWith(p))) : rows;
+    return kept.length ? kept : null;
   } catch { return null; }
 }
 
@@ -550,9 +657,10 @@ export async function home() {
   let rows = [];
   let live = [];
   let failure = null;
+  const budget = makeBudget(HOME_BUDGET_MS);
   try {
-    const manifest = await loadManifest(false);
-    [live, rows] = await Promise.all([homeLiveRows(manifest).catch(() => []), homeRows(manifest)]);
+    const manifest = await loadManifest(false, 9000);
+    [live, rows] = await Promise.all([homeLiveRows(manifest, budget).catch(() => []), homeRows(manifest, budget)]);
   } catch (e) { failure = e; }
   if (rows.length) { saveHome(rows); return live.concat(rows); }
   const kept = savedHome();
@@ -569,20 +677,20 @@ const SECTION_ROWS = 12;
 /** The catalogs whose tabs are showing: "Catálogos 1–8" is the first window, and so on (the plugin's settings). */
 function sectionCatalogs(manifest) {
   const page = Math.max(1, num(kino.config.get("sectionPage")) || 1);
-  return browseCatalogs(manifest).slice((page - 1) * SECTION_TABS, page * SECTION_TABS);
+  return shownCatalogs(manifest).slice((page - 1) * SECTION_TABS, page * SECTION_TABS);
 }
 
 export async function section(arg) {
-  const manifest = await loadManifest(false);
+  const b = makeBudget(HOME_BUDGET_MS);
+  const manifest = await loadManifest(false, 9000);
   const cats = sectionCatalogs(manifest);
   if (!cats.length) return { rows: [] };
   const tabs = cats.map((c) => ({ id: safeId(c.id).slice(0, 100), label: catalogTitle(c).slice(0, 24) }));
   const index = Math.max(0, tabs.findIndex((x) => x.id === (arg && arg.tab)));
   const cat = cats[index];
   const genres = [null].concat(cat.genres.slice(0, SECTION_ROWS - 1));
-  const deadline = Date.now() + DEADLINE_MS;
-  const pages = await pool(genres, 5, async (genre) => (await catalogMetas(cat, extrasOf({ genre }), 10000)).slice(0, 12));
-  const rows = await buildRows(genres.map((genre, i) => ({ cat, genre, metas: pages[i] })), deadline);
+  const pages = await pool(genres, 5, async (genre) => (b.short(2500) ? [] : (await catalogMetas(cat, extrasOf({ genre }), b.cap(10000, 200))).slice(0, 12)));
+  const rows = await buildRows(genres.map((genre, i) => ({ cat, genre, metas: pages[i] })), Math.min(b.end, Date.now() + DEADLINE_MS));
   return { tabs, tab: tabs[index].id, rows };
 }
 
@@ -591,12 +699,12 @@ export async function section(arg) {
 // One tab of the browse screen as a section page: Inicio is the home rows (the live ones have their own page), Catálogos the
 // catalogs after those, one row each. The slides and the wide pictures come from Kino's metadata, the server gives posters only.
 async function tabPage(tab) {
-  const manifest = await loadManifest(false);
-  if (tab !== "catalogos") return { rows: await homeRows(manifest) };
-  const cats = browseCatalogs(manifest).slice(rowsSetting(), rowsSetting() + SECTION_ROWS);
-  const deadline = Date.now() + DEADLINE_MS;
-  const pages = await pool(cats, 5, async (cat) => (await catalogMetas(cat, "", 10000)).slice(0, 12));
-  return { rows: await buildRows(cats.map((cat, i) => ({ cat, genre: null, metas: pages[i] })), deadline) };
+  const b = makeBudget(HOME_BUDGET_MS);
+  const manifest = await loadManifest(false, 9000);
+  if (tab !== "catalogos") return { rows: await homeRows(manifest, b) };
+  const cats = shownCatalogs(manifest).slice(rowsSetting(), rowsSetting() + SECTION_ROWS);
+  const pages = await pool(cats, 5, async (cat) => (b.short(2500) ? [] : (await catalogMetas(cat, "", b.cap(10000, 200))).slice(0, 12)));
+  return { rows: await buildRows(cats.map((cat, i) => ({ cat, genre: null, metas: pages[i] })), Math.min(b.end, Date.now() + DEADLINE_MS)) };
 }
 
 let browseInstance = null;
@@ -604,6 +712,7 @@ const browseScreen = () => (browseInstance ??= makeBrowse({
   kino,
   loadTab: (tab) => tabPage(tab),
   searchTitles: async (q) => { const out = await search({ q }); return Array.isArray(out) ? out : out && out.items ? out.items : []; },
+  sources: { list: () => sourcesList(), toggle: (id, on) => toggleSource(id, on) },
   live: {
     categories: () => liveCategories(),
     channels: (categoryId) => liveChannels({ categoryId }),
@@ -652,8 +761,9 @@ async function categoryArt(cats) {
   if (cached && Date.now() - cached.at < TTL_ART) return cached.v;
   const deadline = Date.now() + DEADLINE_MS;
   const posters = await pool(cats, 5, async (cat) => {
-    if (Date.now() > deadline) return undefined;
-    const metas = await catalogMetas(cat, "", 8000);
+    const room = deadline - Date.now();
+    if (room < 2000) return undefined;
+    const metas = await catalogMetas(cat, "", Math.min(8000, room));
     const first = metas.find((m) => httpUrl(m.poster));
     return first ? httpUrl(first.poster) : undefined;
   });
@@ -666,7 +776,7 @@ async function categoryArt(cats) {
 }
 
 export async function categories() {
-  const manifest = await loadManifest(false);
+  const manifest = await loadManifest(false, 6000);
   const cats = browseCatalogs(manifest).slice(0, 24);
   const art = await categoryArt(cats);
   return cats.map((cat) => {
@@ -685,58 +795,190 @@ const SLICE = 24;
 /** The cursor is "<server skip>,<offset inside that page>": a server page is 100 cards, a Kino page shows fewer. */
 export async function browse(ref, cursor) {
   const r = parseRef(ref);
-  const manifest = await loadManifest(false);
+  const b = makeBudget(17500);
+  const manifest = await loadManifest(false, 6000);
   const cat = manifest.catalogs.find((c) => c.id === r.c && c.type === r.t);
   if (!cat) throw kino.error("not_found", "no catalog", { userMessage: t("unknownRef") });
   const [skipText, offsetText] = String(cursor || "0,0").split(",");
   const skip = num(skipText);
   const offset = num(offsetText);
   const genre = typeof r.g === "string" && cat.genres.includes(r.g) ? r.g : null;
-  const metas = await catalogMetas(cat, extrasOf({ genre, skip }), 15000);
+  const metas = await catalogMetas(cat, extrasOf({ genre, skip }), b.cap(13000, 3500, 3000));
   const slice = metas.slice(offset, offset + SLICE);
-  const items = await itemsOf(slice, cat, ENRICH_BUDGET, Date.now() + DEADLINE_MS, adultName(cat.name) || adultName(genre));
+  const items = await itemsOf(slice, cat, ENRICH_BUDGET, b.end - 1000, adultName(cat.name) || adultName(genre));
   let next;
   if (offset + SLICE < metas.length) next = `${skip},${offset + SLICE}`;
   else if (metas.length >= PAGE && skip + metas.length < 10000) next = `${skip + metas.length},0`;
   return next ? { items, next } : { items };
 }
 
-const MAX_SEARCH_CATALOGS = 18;
+const MAX_SEARCH_CATALOGS = 40; // the budget, not this, decides how many get asked: the quickest first, the never-measured (5 s) after them
+const SEARCH_TOTAL_MS = 13500; // Kino cuts a search at 15 s: asking, naming the top results and ranking all fit in this
+const SEARCH_BUDGET_MS = 11000; // for asking the server when the index had nothing
+const SEARCH_BUDGET_LOCAL_MS = 6000; // the index already answered: the server only adds to it
+const CAP_MIN_MS = 3500; // under this a try says nothing about a catalog
+const CAP_MAX_MS = 9000;
+const CAP_UNKNOWN_MS = 6000;
+const SCOPED_ENOUGH = 8;
+const flat = (x) => String(x || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
 
-export async function search(query) {
-  const q = String(query.q || "").trim();
-  if (q.length < 2) return [];
-  const manifest = await loadManifest(false);
-  let cats = manifest.catalogs.filter((c) => c.search && !isLiveType(c.type));
-  if (query.within) {
-    // Searching inside a "Ver más" page: only that page's catalog, and null when it cannot search (Kino then filters).
-    let r;
-    try { r = parseRef(query.within); } catch { return null; }
-    cats = cats.filter((c) => c.id === r.c && c.type === r.t);
-    if (!cats.length) return null;
+// A catalog is only blamed for a search it had a fair chance to answer: a try cut short by what was left of the budget says nothing
+// about it, and one never asked (the budget ran out first) is not counted at all.
+const FAIR_MS = 3500;
+const SKIPPED = Symbol("skipped");
+
+/** One catalog's search: its cards, null (it did not answer) or SKIPPED (no time left to ask). */
+async function askCatalog(cat, q, cap, left) {
+  if (left < 1500) return SKIPPED;
+  const t0 = Date.now();
+  try {
+    const metas = (await catalogMetas(cat, extrasOf({ search: q }), Math.min(cap, left))).slice(0, 12);
+    noteLatency(cat.id, Date.now() - t0);
+    kino.log(`search ${safeId(cat.id).slice(0, 24)}: ${metas.length} in ${Date.now() - t0} ms`);
+    return metas.map((m) => card(m, cat));
+  } catch (e) {
+    if (left >= cap && cap >= FAIR_MS) noteLatency(cat.id, Math.round(cap * 1.5));
+    kino.log(`search ${safeId(cat.id).slice(0, 24)} failed after ${Date.now() - t0} ms: ${(e && e.code) || "error"}`);
+    return null;
   }
-  cats = cats.slice(0, MAX_SEARCH_CATALOGS);
-  const deadline = Date.now() + DEADLINE_MS;
-  const found = await pool(cats, 5, async (cat) => (await catalogMetas(cat, extrasOf({ search: q }), 10000)).slice(0, 12).map((m) => card(m, cat)));
-  const seen = new Set();
-  const cards = [];
-  for (const list of found) {
-    for (const c of list || []) {
-      if (seen.has(c.key)) continue;
-      seen.add(c.key);
-      cards.push(c);
+}
+
+/** How long a catalog is given: 1.6 times what it has taken (so one that answers in 6 s gets 9.6 s, capped), 6 s when never measured. */
+function capFor(cat) {
+  const ms = readLatency()[cat.id];
+  return Math.round(Math.min(CAP_MAX_MS, Math.max(CAP_MIN_MS, ms ? ms * 1.6 : CAP_UNKNOWN_MS)));
+}
+
+/**
+ * The server's answer from [cats], one catalog at a time (it answers searches almost serially: asking all at once slowed every one
+ * to the sum and all missed the cut), the quickest first, each given a wait that follows how long it has taken, inside [budget]. When
+ * nothing answered and time is left, the first that failed gets one more try with what is left: the server kept scraping after the
+ * first one hung up, so the second often answers at once.
+ */
+async function askCatalogs(cats, q, budget, wantExact, targets) {
+  const lists = new Map();
+  const failed = [];
+  const fair = new Set();
+  let done = false;
+  let asked = 0;
+  const take = async (cat, cap) => {
+    const room = budget.left();
+    const cards = await askCatalog(cat, q, cap, room);
+    if (cards === SKIPPED) return "skipped";
+    asked++;
+    if (cards === null) {
+      if (room >= cap && cap >= FAIR_MS) fair.add(cat.id);
+      return "failed";
+    }
+    lists.set(cat.id, cards);
+    fair.delete(cat.id);
+    noteCatalog(cat.id, true, "search");
+    if (wantExact && cards.some((c) => targets.includes(baseTitle(c.name)))) done = true;
+    return "ok";
+  };
+  for (const cat of cats) {
+    if (done) break;
+    if ((await take(cat, capFor(cat))) === "failed") failed.push(cat);
+  }
+  if (lists.size === 0 && !done) {
+    for (const cat of failed.slice(0, 2)) {
+      if (budget.left() < FAIR_MS) break;
+      if ((await take(cat, budget.left())) === "ok") {
+        failed.splice(failed.indexOf(cat), 1);
+        fair.delete(cat.id);
+        break;
+      }
     }
   }
+  // Only a catalog that failed a try long enough to mean it is counted, and only in the search scope (its Home row is another request).
+  for (const id of fair) noteCatalog(id, false, "search");
+  return { lists, failed: failed.length, asked };
+}
+
+const rankItems = (items, titles) => (typeof kino.rank === "object" && kino.rank && typeof kino.rank.sortBySimilarity === "function" ? kino.rank.sortBySimilarity(items, titles) : items);
+
+export async function search(query) {
+  const total = makeBudget(SEARCH_TOTAL_MS);
+  const q = String(query.q || "").trim().slice(0, 200);
+  if (q.length < 2) return [];
+  const manifest = await loadManifest(false, 4000);
+  const all = manifest.catalogs.filter((c) => c.search && !isLiveType(c.type) && isOn(c));
+  // Inside a "Ver más" page (capability scopedSearch): only that page's catalog, and null when it cannot search (Kino then filters).
+  let only = null;
+  if (query.within) {
+    let r;
+    try { r = parseRef(query.within); } catch { return null; }
+    only = all.find((c) => c.id === r.c && c.type === r.t) || null;
+    if (!only) return null;
+  }
+  const titles = [query.q, query.originalTitle].concat(Array.isArray(query.altTitles) ? query.altTitles : []).filter((x) => typeof x === "string" && x.trim());
+  const local = await searchIndex(q, { only: only && only.id, onKeys: only ? null : new Set(all.map((c) => c.id)), limit: 60 });
+  const localItems = local.map((x) => x.item);
+  // With enough in the index the server is not asked; with a few (a catalog only seen by its Home row) it still is, and adds to them.
+  if (only && local.length >= SCOPED_ENOUGH) return rankItems(localItems, titles);
+
+  const pool_ = byLatency(only ? [only] : healthyOnly(all, "search")).slice(0, MAX_SEARCH_CATALOGS);
+  const budget = makeBudget(Math.min(local.length >= 8 ? SEARCH_BUDGET_LOCAL_MS : SEARCH_BUDGET_MS, total.left()));
+  // When Kino asks for one specific title (it sends a year or a TMDB id), an exact match ends the round early.
+  const wantExact = (query.year > 0 || query.tmdbId > 0) && !only;
+  const { lists, failed } = await askCatalogs(pool_, q, budget, wantExact, titles.map(baseTitle).filter(Boolean));
+  // Not one catalog answered: the server is down or hung. Say so, instead of an empty list that reads "not found" — but only when the
+  // index had nothing to show either.
+  if (lists.size === 0 && failed > 0 && !local.length) throw kino.error("unavailable", "no catalog answered the search", { userMessage: t("timeout") });
+
+  // The answers interleaved (one from each catalog in turn, the quickest first), so no single catalog fills the list.
+  const ordered = pool_.map((c) => lists.get(c.id) || []);
+  const merged = [];
+  for (let i = 0, longest = Math.max(0, ...ordered.map((l) => l.length)); i < longest; i++) for (const l of ordered) if (l[i]) merged.push(l[i]);
+  const seen = new Set();
+  const cards = merged.filter((c) => !seen.has(c.key) && seen.add(c.key));
   const top = cards.slice(0, 60);
-  await enrich(top, ENRICH_BUDGET, deadline);
+  await enrich(top, ENRICH_BUDGET, total.end - 1000);
   flushKinds();
-  return top.map(toItem).filter(Boolean);
+  // A catalog the server names as adult: its titles are marked 18+ (they show only behind the person's code) and never enter the index.
+  const adultCats = new Set(all.filter((c) => adultName(c.name)).map((c) => c.id));
+  const built = top.map((c) => ({ c, item: toItem(c) })).filter((x) => x.item);
+  for (const x of built) if (adultCats.has(x.c.cat)) x.item.adult = true;
+  // Everything the search saw that has a name goes in the index (not only the sixty shown): the next search, and a "Ver más" page's own
+  // search, find them without asking the server.
+  const byCat = new Map();
+  for (const c of merged) {
+    const item = c.name && !adultCats.has(c.cat) ? toItem(c) : null;
+    if (item) byCat.set(c.cat, (byCat.get(c.cat) || []).concat(item));
+  }
+  for (const [id, items] of byCat) await indexItems(items, id);
+  const names = new Set();
+  const out = built.map((x) => x.item).concat(localItems).filter((it) => {
+    const k = flat(it.title);
+    if (!k || names.has(k)) return false;
+    names.add(k);
+    return true;
+  });
+  return rankItems(out, titles);
 }
 
 // ---- 7. titles ---------------------------------------------------------------------------------------------------
 
-async function getMeta(type, id) {
-  const data = await getJson(`/meta/${enc(type)}/${enc(id)}.json`, 15000);
+/** "The server is still preparing it": a first, cold try that ran out of time. Asking again answers, so it is not a failure of the catalog. */
+function warming(userMessage) {
+  const err = kino.error("unavailable", "the server is still preparing it", { userMessage });
+  err.warming = true;
+  return err;
+}
+
+// Kino cuts these calls at 20 s: the page first (up to 17 s), then the extras (Kino's ids, the warm-up) only if time is left.
+const TITLE_BUDGET_MS = 19000;
+const EXTRAS_UNTIL_MS = 12000;
+
+async function getMeta(type, id, capMs) {
+  let data;
+  try {
+    data = await getJson(`/meta/${enc(type)}/${enc(id)}.json`, capMs || 15000);
+  } catch (e) {
+    // "unavailable", not "timeout": Kino words a timeout itself and would drop this sentence; the server keeps scraping, so asking again answers.
+    if (e && e.code === "unavailable" && /timeout/.test(String(e.message))) throw warming(t("warming"));
+    throw e;
+  }
   if (!data || !data.meta) throw kino.error("not_found", "no meta", { userMessage: t("notStremio") });
   return data.meta;
 }
@@ -766,9 +1008,9 @@ async function externalIds(isSeries, meta) {
   }
 }
 
-/** What the server told about the ids wins; what Kino found fills the rest. */
-async function withExternalIds(info, meta, isSeries) {
-  const ext = await externalIds(isSeries, meta);
+/** What the server told about the ids wins; what Kino found fills the rest. Never waits past [ms]: the ids are a nicety. */
+async function withExternalIds(info, meta, isSeries, ms) {
+  const ext = await withTime(ms, externalIds(isSeries, meta));
   if (!ext) return info;
   const ids = Object.assign({}, info.ids);
   for (const k of ["tmdb", "imdb", "mal", "anilist", "kitsu"]) if (ids[k] === undefined && ext[k] !== undefined) ids[k] = ext[k];
@@ -776,24 +1018,69 @@ async function withExternalIds(info, meta, isSeries) {
   return info;
 }
 
+/** The catalog a title's card id came from: the index first, then the short memory; "" when not known. */
+async function catOfRef(r) {
+  const key = "n" + hash(r.i || "");
+  const seen = await indexGet(key);
+  return (seen && seen.cat) || catOfKey(key);
+}
+
 export async function details(ref) {
+  const budget = makeBudget(TITLE_BUDGET_MS - 500);
   const r = parseRef(ref);
-  const meta = await getMeta(r.t, r.i);
+  const meta = await getMeta(r.t, r.i, budget.cap(17000));
   learn(r.t, r.i, meta);
-  return withExternalIds(seriesInfo(meta), meta, false);
+  const info = seriesInfo(meta);
+  return budget.left() > 6000 ? withExternalIds(info, meta, false, Math.min(4000, budget.left() - 1500)) : info;
+}
+
+// Kino's answer must hold a season and a number for each episode, each pair once. A server sends specials as episode 0, season 0, or
+// with no number at all: those are numbered after the last real episode of their season instead of being merged into episode 1.
+function numbered(rows) {
+  const top = new Map();
+  for (const r of rows) if (r.number > 0) top.set(r.season, Math.max(top.get(r.season) || 0, r.number));
+  for (const r of rows) {
+    if (r.number > 0) continue;
+    r.number = (top.get(r.season) || 0) + 1;
+    top.set(r.season, r.number);
+  }
+  const seen = new Set();
+  return rows
+    .sort((a, b) => a.season - b.season || a.number - b.number)
+    .filter((r) => {
+      const k = r.season + ":" + r.number;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
 }
 
 export async function episodes(ref) {
+  const budget = makeBudget(TITLE_BUDGET_MS);
   const r = parseRef(ref);
-  const meta = await getMeta(r.t, r.i);
+  const own = await catOfRef(r);
+  let meta;
+  try {
+    meta = await getMeta(r.t, r.i, budget.cap(17000));
+  } catch (e) {
+    // The server is still scraping the page. Rather than a dead end, the title plays as one entry: its own streams (a pack's files come
+    // together in them). The page is warming, so the next time the full list is there.
+    if (e && e.warming) return { series: {}, episodes: [{ season: 1, number: 1, ref: makeRef(r.t, r.i), title: t("movieEpisode") }] };
+    throw e;
+  }
+  noteCatalog(own, true, "play");
   learn(r.t, r.i, meta);
   const videos = (Array.isArray(meta.videos) ? meta.videos : []).filter((v) => v && typeof v.id === "string");
-  const list = [];
-  videos.forEach((v, index) => {
-    const season = num(v.season) || 1;
-    if (season < 1 || season > 999) return;
-    const number = num(v.episode != null ? v.episode : v.number) || index + 1;
-    const ep = { season, number: Math.min(Math.max(number, 1), 99999), ref: makeRef(r.t, v.id) };
+  const rows = [];
+  videos.forEach((v) => {
+    const seasonRaw = num(v.season);
+    if (seasonRaw > 999) return;
+    const raw = num(v.episode != null ? v.episode : v.number);
+    // A special (season 0) is numbered after the last real episode of season 1, never over its first one.
+    rows.push({ v, season: seasonRaw > 0 ? seasonRaw : 1, number: seasonRaw > 0 && raw > 0 ? Math.min(raw, 99999) : 0 });
+  });
+  const list = numbered(rows).map(({ v, season, number }) => {
+    const ep = { season, number, ref: makeRef(r.t, v.id) };
     const title = v.title || v.name;
     if (title) ep.title = String(title).slice(0, 200);
     const still = httpUrl(v.thumbnail);
@@ -802,13 +1089,14 @@ export async function episodes(ref) {
     if (overview) ep.overview = String(overview);
     const aired = /^\d{4}-\d{2}-\d{2}/.exec(String(v.released || ""));
     if (aired) ep.airDate = aired[0];
-    list.push(ep);
+    return ep;
   });
   // A title with no episode list (a movie, to Stremio) plays as one entry: the card's own id is the playable one.
   if (!list.length) list.push({ season: 1, number: 1, ref: makeRef(r.t, r.i), title: t("movieEpisode") });
-  list.sort((a, b) => (a.season - b.season) || (a.number - b.number));
   rememberEpisodes(ref, list.map((e) => e.ref));
-  return { series: await withExternalIds(seriesInfo(meta), meta, videos.length > 0), episodes: list };
+  let series = seriesInfo(meta);
+  if (TITLE_BUDGET_MS - budget.left() < EXTRAS_UNTIL_MS) series = await withExternalIds(series, meta, videos.length > 0, Math.min(4000, budget.left() - 1500));
+  return { series, episodes: list };
 }
 
 // ---- 8. streams --------------------------------------------------------------------------------------------------
@@ -916,31 +1204,220 @@ function streamFor(list, live) {
   return stream;
 }
 
-async function streamsOf(type, id) {
-  const data = await getJson(`/stream/${enc(type)}/${enc(id)}.json`, 25000);
+const STREAM_CAP_MS = 17000;
+
+/** A title's streams. [capMs] cuts the wait (Kino ends a resolve at 20 s: the server keeps scraping, so a try that ran out says so). */
+async function streamsOf(type, id, capMs) {
+  let data;
+  try {
+    data = await getJson(`/stream/${enc(type)}/${enc(id)}.json`, capMs || STREAM_CAP_MS);
+  } catch (e) {
+    if (e && e.code === "unavailable" && /timeout/.test(String(e.message))) throw warming(t("warmingVideo"));
+    throw e;
+  }
   return Array.isArray(data && data.streams) ? data.streams : [];
 }
 
-async function resolveRef(ref) {
-  const r = parseRef(ref);
-  const live = isLiveType(r.t);
-  let list = r.i ? await streamsOf(r.t, r.i) : [];
-  let stream = streamFor(list, live);
-  if (!stream && live && r.c && r.n) {
+const RESOLVE_BUDGET_MS = 18500; // inside the 20 s Kino gives a resolve
+const MIN_CALL_MS = 2500; // under this a request is not worth starting
+
+/** Streams inside [budget]: each try is cut to what is left, and a second look after an empty answer never starts past it. */
+async function streamsWithin(type, id, capMs, retry, budget) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const cap = Math.min(capMs || STREAM_CAP_MS, budget.left() - 500);
+    if (cap < MIN_CALL_MS) return [];
+    const tryStart = Date.now();
+    const list = (await streamsOf(type, id, cap)).filter(playable);
+    if (list.length) return list;
+    if (retry !== false && attempt < 1 && Date.now() - tryStart < 6000 && budget.left() - 800 > MIN_CALL_MS + 500) await kino.sleep(800);
+    else break;
+  }
+  return [];
+}
+
+// ---- the same title in another catalog
+const XSRC_PREFIX = "rb_xsrc:";
+const XSRC_FOR_MS = 6 * 60 * 60 * 1000;
+
+/** A title reduced to what two catalogs agree on: no season, year, quality tags or punctuation. */
+function baseTitle(title) {
+  return String(title || "")
+    .toLowerCase()
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/\s(?:\d{3,4}p\b|web-?dl|web-?rip|blu-?ray|brrip|hdrip|hdtc|hdcam|dual audio|\{).*$/i, " ")
+    .replace(/\(.*?\)|\[.*?\]|\{.*?\}/g, " ")
+    .replace(/\b(?:season|temporada)\s*\d+.*$/i, " ")
+    .replace(/\bs\d{1,2}\b.*$/i, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function seasonOf(title) {
+  const m = /\bseason\s*(\d+)|\btemporada\s*(\d+)|\bS(\d{1,2})\b/i.exec(String(title || ""));
+  return m ? parseInt(m[1] || m[2] || m[3], 10) : null;
+}
+
+/**
+ * Looks for [title] in the other catalogs and asks the first exact match for its streams, all inside [budget]. First in the local
+ * index (titles already seen cost no request, so the budget goes to the streams), then by searching the catalogs quickest first.
+ * Paused catalogs are left out. Returns `{ list, ref, label }` or null.
+ */
+async function crossCatalog(title, ownCat, manifest, budget, wantType, wantYear) {
+  const want = baseTitle(title);
+  if (want.length < 2) return null;
+  const wantSeason = seasonOf(title);
+  // The same film: the same words, the same season, and (when both say one) the same year; "Dune (1984)" is not "Dune (2021)".
+  const yearOf = (name) => { const m = /\((19|20)\d{2}\)/.exec(String(name || "")); return m ? parseInt(m[0].slice(1, 5), 10) : 0; };
+  const wantY = wantYear || yearOf(title);
+  const same = (name, y) => {
+    if (baseTitle(name) !== want) return false;
+    if (wantSeason !== null && seasonOf(name) !== null && seasonOf(name) !== wantSeason) return false;
+    const there = y || yearOf(name);
+    return !(wantY && there && wantY !== there);
+  };
+  const br = readBreaker();
+  const others = manifest.catalogs.filter((c) => c.search && !isLiveType(c.type) && c.id !== ownCat && isOn(c) && !isPaused(c.id, br));
+  const titleOf = (id) => catalogTitle(others.find((c) => c.id === id) || { name: id, type: "" });
+
+  // 1. what the index already knows
+  const words = String(title).replace(/\(.*?\)|\[.*?\]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60);
+  const known = (await searchIndex(words, { onKeys: new Set(others.map((c) => c.id)), limit: 40 })).filter((x) => same(x.item.title, x.item.year));
+  const rankOf = new Map(byLatency(others).map((c, i) => [c.id, i]));
+  known.sort((a, b) => (rankOf.has(a.cat) ? rankOf.get(a.cat) : 99) - (rankOf.has(b.cat) ? rankOf.get(b.cat) : 99));
+  for (const x of known.slice(0, 3)) {
+    if (budget.left() < MIN_CALL_MS + 500) return null;
+    let ref;
+    try { ref = parseRef(x.item.ref); } catch { continue; }
+    if (wantType && ref.t !== wantType) continue; // a film is not swapped for a series of the same name: its streams need an episode
+    try {
+      const list = await streamsWithin(ref.t, ref.i, Math.min(8000, budget.left() - 500), false, budget);
+      if (list.length) return { list, ref: x.item.ref, label: titleOf(x.cat) };
+    } catch { /* this one is not ready: the next */ }
+  }
+
+  // 2. ask the catalogs
+  for (const cat of byLatency(others)) {
+    if (budget.left() < 5500) return null;
+    let metas = [];
+    try { metas = await catalogMetas(cat, extrasOf({ search: words }), Math.min(5000, budget.left() - 3500)); } catch { continue; }
+    const hit = metas.find((m) => m && typeof m.id === "string" && same(String(m.name || ""), year(m)) && (!wantType || String(m.type || cat.type) === wantType));
+    if (!hit) continue;
+    if (budget.left() < 3000) return null;
+    const type = String(hit.type || cat.type);
+    try {
+      const list = await streamsWithin(type, hit.id, Math.min(8000, budget.left() - 500), false, budget);
+      if (list.length) return { list, ref: makeRef(type, hit.id), label: catalogTitle(cat) };
+    } catch { /* not ready: warmed below */ }
+    getJson(`/stream/${enc(type)}/${enc(hit.id)}.json`, 1000).catch(() => null);
+    return null;
+  }
+  return null;
+}
+
+/** Why none of [list] can play, as the text the person reads. */
+function whyNot(list, live) {
+  const why = list.map((s) => (s && typeof s.url === "string" ? blockedBy(s) : null)).filter(Boolean);
+  const key = why.includes("soon") && !why.includes("drm") ? "notYet" : why.includes("drm") ? "drmOnly" : live ? "noChannel" : "noStreams";
+  return kino.error("unavailable", "no streams", { userMessage: t(key) });
+}
+
+async function resolveLive(r, budget) {
+  let list = r.i ? await streamsOf(r.t, r.i, budget.cap(STREAM_CAP_MS, 500, MIN_CALL_MS)) : [];
+  let stream = streamFor(list, true);
+  if (!stream && r.c && r.n && budget.left() > 6000) {
     // The id inside a saved channel may be stale (its token expired): find the channel again by name and ask afresh.
-    const cat = (await loadManifest(false)).catalogs.find((c) => c.id === r.c);
-    const fresh = cat ? (await catalogMetas(cat, "", 15000)).find((m) => plainName(m.name) === r.n) : null;
-    if (fresh) {
-      list = await streamsOf(r.t, fresh.id);
+    const cat = (await loadManifest(false, 4000)).catalogs.find((c) => c.id === r.c);
+    const fresh = cat ? (await catalogMetas(cat, "", budget.cap(10000, 4000, MIN_CALL_MS))).find((m) => plainName(m.name) === r.n) : null;
+    if (fresh && budget.left() > MIN_CALL_MS + 500) {
+      list = await streamsOf(r.t, fresh.id, budget.cap(STREAM_CAP_MS, 500, MIN_CALL_MS));
       stream = streamFor(list, true);
     }
   }
-  if (!stream) {
-    const why = list.map((s) => (s && typeof s.url === "string" ? blockedBy(s) : null)).filter(Boolean);
-    const key = why.includes("soon") && !why.includes("drm") ? "notYet" : why.includes("drm") ? "drmOnly" : live ? "noChannel" : "noStreams";
-    throw kino.error("unavailable", "no streams", { userMessage: t(key) });
+  if (!stream) throw whyNot(list, true);
+  return stream;
+}
+
+async function resolveVideo(r, ref, options, budget) {
+  const key = "n" + hash(r.i);
+  const seen = await indexGet(key);
+  let own = (seen && seen.cat) || catOfKey(key);
+  let title = seen ? seen.title : "";
+  // An episode's ref names its video, not its series: the series it was listed under supplies the title and the catalog.
+  if (!title) {
+    const seriesRef = seriesOfEpisode(ref);
+    if (seriesRef) {
+      try {
+        const sk = "n" + hash(parseRef(seriesRef).i);
+        const ss = await indexGet(sk);
+        if (!own) own = (ss && ss.cat) || catOfKey(sk);
+      } catch { /* no series: the title just has no fallback */ }
+    }
+  }
+  // Only a title's own card has a copy in another catalog to fall back on; one episode of a series does not.
+  const canSwap = title.length > 1;
+  const memKey = XSRC_PREFIX + hash(ref);
+  const manifest = canSwap ? await loadManifest(false, 3000).catch(() => null) : null;
+  let list = [];
+  let from = "";
+  let failure = null;
+  // Kino says the copy it was given did not play: the swap remembered for this title may be the one that failed.
+  if (options && options.retry) { try { kino.storage.remove(memKey); } catch { /* none kept */ } }
+
+  // The same title was already found in another catalog for this ref: that one first (it was warm a moment ago).
+  if (canSwap) {
+    try {
+      const mem = JSON.parse(kino.storage.get(memKey) || "null");
+      if (mem && typeof mem.t === "string" && typeof mem.i === "string") {
+        list = await streamsWithin(mem.t, mem.i, 8000, false, budget);
+        if (list.length) from = String(mem.label || "");
+      }
+    } catch { list = []; }
+  }
+  // A catalog whose breaker is open has been failing: do not spend the 20 s on it first, ask the others, and come back to it only if
+  // they gave nothing and time is left.
+  const pausedFirst = !list.length && canSwap && manifest && own && isPaused(own, null, "play");
+  const cross = async () => {
+    if (!manifest) return;
+    const swap = await crossCatalog(title, own, manifest, budget, r.t, seen && seen.year).catch(() => null);
+    if (!swap) return;
+    list = swap.list;
+    from = swap.label;
+    try {
+      const sr = parseRef(swap.ref);
+      kino.storage.set(memKey, JSON.stringify({ t: sr.t, i: sr.i, label: swap.label }), { ttlMs: XSRC_FOR_MS });
+    } catch { /* not remembered */ }
+  };
+  if (pausedFirst) await cross();
+  if (!list.length && (!pausedFirst || budget.left() > 6000)) {
+    try {
+      list = await streamsWithin(r.t, r.i, pausedFirst ? budget.left() - 500 : canSwap ? 9000 : STREAM_CAP_MS, !canSwap, budget);
+    } catch (e) {
+      failure = e;
+    }
+    // A cold try that ran out of time ("still preparing") is the normal first open, not a failure of the catalog.
+    if (!(failure && failure.warming)) noteCatalog(own, list.length > 0, "play");
+  }
+  if (!list.length && canSwap && !pausedFirst) await cross();
+  if (!list.length) {
+    if (failure) throw failure;
+    // Nothing anywhere, and nobody timed out: the title is gone, so it stops turning up in searches.
+    await indexRemove(key);
+    throw whyNot([], false);
+  }
+  const ranked = rank(list.filter(playable), ref, options, hash);
+  const stream = streamFor(ranked, false);
+  if (!stream) throw whyNot(list, false);
+  if (from) {
+    const mark = (s) => (s.label ? { ...s, label: `${from} · ${s.label}`.slice(0, 48) } : { ...s, label: from.slice(0, 48) });
+    Object.assign(stream, mark(stream));
+    if (stream.alternatives) stream.alternatives = stream.alternatives.map(mark);
   }
   return stream;
+}
+
+async function resolveRef(ref, options) {
+  const budget = makeBudget(RESOLVE_BUDGET_MS);
+  const r = parseRef(ref);
+  return isLiveType(r.t) ? resolveLive(r, budget) : resolveVideo(r, ref, options, budget);
 }
 
 // ---- 9. live channels --------------------------------------------------------------------------------------------
@@ -953,17 +1430,22 @@ const TTL_LIVE_OK = 30 * 60 * 1000;
  * come with ClearKey keys (the player cannot decrypt them) is left out until the server offers something else. The
  * verdict is kept for half an hour; a catalog that could not be checked is shown.
  */
-async function playableLiveCatalogs(manifest) {
-  const cats = manifest.catalogs.filter((c) => c.browsable && isLiveType(c.type));
+async function playableLiveCatalogs(manifest, budget) {
+  const cats = manifest.catalogs.filter((c) => c.browsable && isLiveType(c.type) && isOn(c));
   let cached = null;
   try { cached = JSON.parse(kino.storage.get(LIVE_OK_KEY) || "null"); } catch { /* unreadable: check again */ }
   if (cached && Date.now() - cached.at < TTL_LIVE_OK) return cats.filter((c) => cached.v[c.id] !== false);
+  // Checking asks a catalog's channels and their streams, a slow thing: it shares one budget (12 s unless the caller has less), and a
+  // catalog it had no time to check is shown rather than hidden.
+  const b = budget && budget.left() < 12000 ? budget : makeBudget(12000);
   const verdicts = await pool(cats, 5, async (cat) => {
-    const metas = (await catalogMetas(cat, "", 20000)).slice(0, 2);
+    if (b.short(3000)) return undefined;
+    const metas = (await catalogMetas(cat, "", b.cap(8000, 200))).slice(0, 2);
     let asked = false;
     for (const m of metas) {
+      if (b.short(2500)) break;
       try {
-        const list = await streamsOf(cat.type, m.id);
+        const list = await streamsOf(cat.type, m.id, b.cap(8000, 200));
         asked = true;
         if (list.some(playable)) return true;
       } catch { /* try the next one */ }
@@ -972,13 +1454,16 @@ async function playableLiveCatalogs(manifest) {
   });
   const v = {};
   cats.forEach((cat, i) => { if (verdicts[i] !== undefined) v[cat.id] = verdicts[i]; });
-  try { kino.storage.set(LIVE_OK_KEY, JSON.stringify({ at: Date.now(), v })); } catch { /* storage full: not cached */ }
+  if (Object.keys(v).length) {
+    try { kino.storage.set(LIVE_OK_KEY, JSON.stringify({ at: Date.now(), v })); } catch { /* storage full: not cached */ }
+  }
   return cats.filter((c) => v[c.id] !== false);
 }
 
 export async function liveCategories() {
-  const manifest = await loadManifest(false);
-  return (await playableLiveCatalogs(manifest)).map((c) => ({ id: safeId(c.id), title: catalogTitle(c) }));
+  const budget = makeBudget(18500);
+  const manifest = await loadManifest(false, 6000);
+  return (await playableLiveCatalogs(manifest, budget)).map((c) => ({ id: safeId(c.id), title: catalogTitle(c) }));
 }
 
 /** What names a channel, without the live/ended marks a server puts in front of an event's title. */
@@ -1005,15 +1490,16 @@ const CHANNEL_PAGE = 500;
 
 /** The cursor is "<server skip>,<offset inside that page>", like browse's: a server page may hold more than Kino takes. */
 export async function liveChannels(arg) {
-  const manifest = await loadManifest(false);
+  const budget = makeBudget(18500);
+  const manifest = await loadManifest(false, 5000);
   const cat = manifest.catalogs.find((c) => isLiveType(c.type) && safeId(c.id) === arg.categoryId);
   if (!cat) return { items: [] };
   const [skipText, offsetText] = String(arg.cursor || "0,0").split(",");
   const skip = num(skipText);
   const offset = num(offsetText);
-  const metas = await catalogMetas(cat, extrasOf({ skip }), 20000);
+  const metas = await catalogMetas(cat, extrasOf({ skip }), budget.cap(12000, 4500, 3000));
   // Some catalogs ignore `skip` and send the same list again: a page that opens with the first page's card is the end.
-  const first = skip ? await catalogMetas(cat, "", 20000) : null;
+  const first = skip ? await catalogMetas(cat, "", budget.cap(12000, 500, 2500)) : null;
   if (first && first.length && metas.length && first[0].id === metas[0].id) return { items: [] };
   const taken = new Set();
   const items = metas.slice(offset, offset + CHANNEL_PAGE).map((m) => channelOf(m, cat, arg.categoryId, taken)).filter(Boolean);
@@ -1029,11 +1515,13 @@ const MAX_LIVE_SEARCH_CATALOGS = 12;
 export async function liveSearch(arg) {
   const q = String(arg.query || "").trim();
   if (q.length < 2) return { items: [] };
-  const manifest = await loadManifest(false);
-  const cats = (await playableLiveCatalogs(manifest)).filter((c) => c.search).slice(0, MAX_LIVE_SEARCH_CATALOGS);
-  const found = await pool(cats, 5, async (cat) => {
+  const budget = makeBudget(13500);
+  const manifest = await loadManifest(false, 4000);
+  const cats = (await playableLiveCatalogs(manifest, makeBudget(Math.min(5000, budget.left() - 6000)))).filter((c) => c.search).slice(0, MAX_LIVE_SEARCH_CATALOGS);
+  // Every catalog at once, each cut to what is left (Kino cuts a search at 15 s and keeps nothing of one that ran over).
+  const found = await pool(cats, Math.max(1, cats.length), async (cat) => {
     const taken = new Set();
-    return (await catalogMetas(cat, extrasOf({ search: q }), 10000)).slice(0, 40).map((m) => channelOf(m, cat, safeId(cat.id), taken)).filter(Boolean);
+    return (await catalogMetas(cat, extrasOf({ search: q }), budget.cap(9000, 500, 2000))).slice(0, 40).map((m) => channelOf(m, cat, safeId(cat.id), taken)).filter(Boolean);
   });
   const seen = new Set();
   const items = [];
@@ -1044,7 +1532,7 @@ export async function liveSearch(arg) {
 // ---- 10. subtitles -----------------------------------------------------------------------------------------------
 
 export async function subtitles(arg) {
-  const manifest = await loadManifest(false);
+  const manifest = await loadManifest(false, 5000);
   if (!manifest.resources.includes("subtitles") || !arg.imdbId) return [];
   const series = arg.kind === "series";
   const id = series && arg.season && arg.episode ? `${arg.imdbId}:${arg.season}:${arg.episode}` : arg.imdbId;
@@ -1058,38 +1546,97 @@ function detailOf(e) {
   return (e && (e.userMessage || e.code)) || "error";
 }
 
+// The catalogs the sources page lists: every one the manifest has (live ones too), with whether it is on and how it is doing. Read
+// from the kept manifest without waiting for anything: the screen is a pure view.
+export function sourcesList() {
+  const m = manifestNow();
+  if (!m) return [];
+  const br = readBreaker();
+  const lat = readLatency();
+  return m.catalogs.filter((c) => c.id && !adultName(c.name)).slice(0, 60).map((c) => ({
+    id: c.id,
+    key: safeId(c.id).slice(0, 48) + "-" + hash(c.id).slice(0, 8),
+    title: catalogTitle(c),
+    live: isLiveType(c.type),
+    on: isOn(c),
+    pausedMin: Math.ceil(pausedFor(c.id, br) / 60000),
+    ms: lat[c.id] || 0,
+  }));
+}
+
+/** One switch on the sources page: freeze what every catalog is now, then apply this change, so picking one never moves the others. */
+export function toggleSource(id, on) {
+  const m = manifestNow();
+  if (!m || !m.catalogs.some((c) => c.id === id)) return false;
+  const picks = Object.fromEntries(m.catalogs.map((c) => [c.id, isOn(c)]));
+  picks[id] = on !== false;
+  // Picks of catalogs the manifest no longer lists are kept (the server may bring one back); and a write the storage refused is not "done".
+  return writePicks({ ...readPicks(), ...picks });
+}
+
 export async function settingsStatus() {
+  const out = {};
   try {
-    const manifest = await loadManifest(false);
-    return { serverStatus: t("online", { catalogs: manifest.catalogs.length }) };
+    const manifest = await loadManifest(false, 6000);
+    out.serverStatus = t("online", { catalogs: manifest.catalogs.length });
+    const list = sourcesList();
+    out.sources = t("sourcesStatus", { on: list.filter((x) => x.on).length, all: list.length, paused: list.filter((x) => x.on && x.pausedMin > 0).length });
   } catch (e) {
-    return { serverStatus: t("offline", { detail: detailOf(e) }) };
+    out.serverStatus = t("offline", { detail: detailOf(e) });
   }
+  out.index = t("indexStatus", { n: await indexSize() });
+  return out;
 }
 
 /** Walks the same road a person does (manifest, catalog, title page, stream) and names the first step that fails. */
-export async function action(key) {
-  if (key !== "checkConn") return null;
+async function checkConnection() {
+  const budget = makeBudget(27000); // Kino gives an action 30 s
   let manifest;
-  try { manifest = await loadManifest(true); } catch (e) { return { message: t("stepManifest", { detail: detailOf(e) }) }; }
+  try { manifest = await loadManifest(true, 10000); } catch (e) { return { message: t("stepManifest", { detail: detailOf(e) }) }; }
   const cat = browseCatalogs(manifest)[0];
   if (!cat) return { message: t("stepCatalog", { detail: "0" }) };
   let metas;
   try {
-    metas = await catalogMetas(cat, "", 15000);
+    metas = await catalogMetas(cat, "", budget.cap(10000, 9000, 3000));
     if (!metas.length) throw kino.error("unavailable", "empty");
   } catch (e) { return { message: t("stepCatalog", { detail: catalogTitle(cat) + ": " + detailOf(e) }) }; }
   const sample = metas[0];
   const type = String(sample.type || cat.type);
-  try { await getMeta(type, sample.id); } catch (e) { return { message: t("stepMeta", { detail: detailOf(e) }) }; }
+  try { await getMeta(type, sample.id, budget.cap(15000, 4000, 3000)); } catch (e) { return { message: t("stepMeta", { detail: detailOf(e) }) }; }
   try {
-    if (!streamFor(await streamsOf(type, sample.id), false)) throw kino.error("unavailable", "no streams");
+    if (!streamFor(await streamsOf(type, sample.id, budget.cap(STREAM_CAP_MS, 0, 3000)), false)) throw kino.error("unavailable", "no streams");
   } catch (e) { return { message: t("stepStream", { detail: detailOf(e) }) }; }
   return { message: t("ok", { catalogs: manifest.catalogs.length }) };
 }
 
-export async function resolve(ref) {
-  const out = await resolveRef(ref);
+/** What is only a copy of the server's answers (the person's own data is not touched: recent titles, search history, the picks). */
+function clearCaches() {
+  let idx = [];
+  try { idx = JSON.parse(kino.storage.get(CM_INDEX) || "[]"); } catch { idx = []; }
+  for (const e of Array.isArray(idx) ? idx : []) if (e && typeof e.k === "string") { try { kino.storage.remove(e.k); } catch { /* gone anyway */ } }
+  for (const k of [CM_INDEX, MANIFEST_KEY, ART_KEY, LIVE_OK_KEY, HOME_KEY]) { try { kino.storage.remove(k); } catch { /* gone anyway */ } }
+  MEM.clear();
+}
+
+export async function action(key) {
+  if (key === "checkConn") return checkConnection();
+  if (key === "resume") {
+    resetBreaker();
+    return { message: t("resumed") };
+  }
+  if (key === "clearIndex") {
+    await clearIndex();
+    return { message: t("indexCleared") };
+  }
+  if (key === "clearCache") {
+    clearCaches();
+    return { message: t("cacheCleared") };
+  }
+  return null;
+}
+
+export async function resolve(ref, options) {
+  const out = await resolveRef(ref, options);
   // The browse screen's "Continuar viendo": a play that found a copy is remembered under its series (or the movie's own ref).
   try {
     if (!isLiveType(parseRef(ref).t)) browseScreen().notePlayed(seriesOfEpisode(ref) || ref);

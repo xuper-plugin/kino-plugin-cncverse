@@ -120,6 +120,7 @@ export const PROPS = {
     ["aspect", "`16:9` \\| `2:3` \\| `1:1` \\| `banner` \\| `w:h`", "the picture's own", "the box's shape; `w:h` is any width over height from 0.2 to 5, like `1.4:1` or `900:1300`"],
     ["fit", "`cover` \\| `contain` \\| `width`", "`cover`", "how the picture sits in its box: `cover` fills and crops, `contain` shows all of it, `width` takes the width and the picture's own height (the `aspect`, or 2:3, holds its place until it loads)"],
     ["focus", "`top` \\| `center` \\| `bottom`", "`center`", "the part of the picture that stays when `cover` crops it"],
+    [S.imageHeaders.field, "`{ Referer?, User-Agent? }`", "none", `the request headers the picture is asked with, for a site that answers only to its own page: only \`Referer\` (an https address) and \`User-Agent\`, each a text of up to ${n(S.imageHeaders.maxChars)} characters; sent only when the picture's host is in your manifest's \`hosts\` (and so is the Referer's); an older Kino asks without them ([Pictures that need a Referer](#image-headers))`],
     ["fallback", NODE, "none", `drawn in the image's box when the picture fails or there is no \`url\`: only ${codes(S.fallbackWidgets.widgets.map((w) => namesOf(w)[0]))}, at any depth, never pressed`],
   ],
   icon: [["name", ICONS.length + " names", "required", `one of Kino's icons (the [icon table](#icon-names)): ${codes(ICONS)}; the last ${EXTRA_ICONS.names.length} from apiVersion ${EXTRA_ICONS.apiVersion}`]],
@@ -203,17 +204,20 @@ export const PROPS = {
   titleCard: [
     ["item", "`KinoItem`", "required", "the shape a `home` row returns (`id`, `ref`, `title`, `kind`, `poster`...); a series needs your `episodes` capability"],
     SIZE,
+    ["headers", "`{ Referer?, User-Agent? }`", "none", "additive, no new apiVersion (Kino 0.9.83): the request headers every picture of the node is asked with (each item's poster and backdrop, the hero's image and logo), the same rules as an `Image`'s [headers](#image-headers)"],
   ],
   titleRail: [
     ["title", "string", "required", "the row's heading (`titleEn`)"],
     ["items", "`KinoItem[]`", "required", `1 to ${L.maxListItems} (${L.maxFlatTitles} when drawn all at once)`],
     ["ref", "string", "none", `with it, the row's «Ver más» opens your \`browse\` (at most ${n(L.maxRefChars)} characters)`],
     SIZE,
+    ["headers", "`{ Referer?, User-Agent? }`", "none", "additive, no new apiVersion (Kino 0.9.83): the request headers every picture of the node is asked with (each item's poster and backdrop, the hero's image and logo), the same rules as an `Image`'s [headers](#image-headers)"],
     ...paging(),
   ],
   titleGrid: [
     ["items", "`KinoItem[]`", "required", `1 to ${L.maxListItems} (${L.maxFlatTitles} when drawn all at once)`],
     ["columns", `1 to ${L.maxGridColumns}`, "`3`", ""],
+    ["headers", "`{ Referer?, User-Agent? }`", "none", "additive, no new apiVersion (Kino 0.9.83): the request headers every picture of the node is asked with (each item's poster and backdrop, the hero's image and logo), the same rules as an `Image`'s [headers](#image-headers)"],
     ...paging(),
   ],
   heroCard: [
@@ -221,6 +225,7 @@ export const PROPS = {
     ["text", "string", "none", "`textEn`"],
     ["image", "https URL", "none", "a public https picture"],
     ["logo", "https URL", "none", "additive, no new apiVersion: a title's logo (a public https picture) drawn where the title's text is, when it loads; the text still names it for a screen reader and shows when the logo cannot"],
+    ["headers", "`{ Referer?, User-Agent? }`", "none", "additive, no new apiVersion (Kino 0.9.83): the request headers every picture of the node is asked with (each item's poster and backdrop, the hero's image and logo), the same rules as an `Image`'s [headers](#image-headers)"],
     ["buttons", "button nodes", "none", `at most ${L.maxHeroButtons}`],
     ["h", "a size of the scale", "Kino's (240 dp, 320 on a TV)", "additive, no new apiVersion: the banner's height; a per-size map works (`{ compact: 200, expanded: 240 }`)"],
   ],

@@ -94,9 +94,22 @@ var WORDS = {
   brSettings: ["Configuraci\xF3n", "Settings"],
   brLive: ["En vivo", "Live"],
   brLiveSearchHint: ["Buscar en los canales en vivo", "Search the live channels"],
+  brSources: ["Fuentes", "Sources"],
+  brSourcesHelp: ["Enciende las que quieras. Una que falla se pausa sola un rato y las dem\xE1s siguen.", "Switch on the ones you want. One that fails pauses itself for a while and the others carry on."],
+  brSrcOk: ["responde", "responding"],
+  brSrcSlow: ["lenta", "slow"],
+  brSrcPaused: ["en pausa {min} min", "paused {min} min"],
+  brSrcNotSaved: ["No se pudo guardar la elecci\xF3n (almacenamiento lleno). Vac\xEDa la cach\xE9 en Configuraci\xF3n.", "The choice could not be saved (storage full). Clear the cache in Settings."],
+  brSrcNew: ["sin medir todav\xEDa", "not measured yet"],
+  brSrcOff: ["apagada", "off"],
+  brSrcLive: ["en vivo", "live"],
   brLiveEmpty: ["No hay canales en vivo por ahora.", "No live channels right now."]
 };
 var both = (key) => ({ es: WORDS[key][0], en: WORDS[key][1] });
+var fill = (key, vars = {}) => {
+  const f = (s) => s.replace(/\{(\w+)\}/g, (_, k) => String(vars[k] != null ? vars[k] : ""));
+  return { es: f(WORDS[key][0]), en: f(WORDS[key][1]) };
+};
 var KEYS = Object.keys(WORDS);
 
 // src/browse/logo.js
@@ -288,7 +301,41 @@ function browseView({ tab, data, recent, live = [], pending, failed, device = "p
     ...pending ? { every: { ms: POLL_MS, event: "tick" } } : {}
   };
 }
-function settingsView() {
+function sourceStatus(x) {
+  const parts = (l) => {
+    const out = [];
+    if (!x.on) out.push(both("brSrcOff")[l]);
+    else if (x.pausedMin > 0) out.push(fill("brSrcPaused", { min: x.pausedMin })[l]);
+    else if (!x.ms) out.push(both("brSrcNew")[l]);
+    else out.push(both(x.ms > 8e3 ? "brSrcSlow" : "brSrcOk")[l] + " \xB7 " + (x.ms / 1e3).toFixed(1) + " s");
+    if (x.live) out.push(both("brSrcLive")[l]);
+    return out.join(" \xB7 ");
+  };
+  return { text: parts("es"), textEn: parts("en") };
+}
+function sourcesBlock(sources) {
+  if (!Array.isArray(sources) || sources.length === 0) return [];
+  return [{
+    type: "Column",
+    key: "sources",
+    gap: 12,
+    children: [
+      { type: "Text", key: "srcTitle", style: "h4", ...twin("brSources") },
+      { type: "Text", key: "srcHelp", color: "muted", ...twin("brSourcesHelp") },
+      ...sources.slice(0, 60).map((x) => ({
+        type: "Column",
+        key: "src-" + x.key,
+        gap: 4,
+        children: [
+          { type: "Switch", key: "sw-" + x.key, labelText: x.title, labelTextEn: x.title, value: x.on, onChanged: { event: "toggleSource", arg: x.id } },
+          { type: "Text", key: "st-" + x.key, color: "muted", ...sourceStatus(x) }
+        ]
+      })),
+      { type: "Divider", key: "srcEnd" }
+    ]
+  }];
+}
+function settingsView({ sources = [] } = {}) {
   return {
     type: "Scaffold",
     appBar: {
@@ -299,7 +346,7 @@ function settingsView() {
       leading: { type: "IconButton", key: "back", icon: "arrow_back", ...twin("brBack", "labelText"), ...twin("brBack", "tooltip"), onPressed: "back" },
       title: logo()
     },
-    body: { type: "SingleChildScrollView", key: "settings-page", children: [{ type: "Column", padding: { compact: 12, expanded: 24 }, gap: 16, children: [{ type: "settings", key: "form" }] }] }
+    body: { type: "SingleChildScrollView", key: "settings-page", children: [{ type: "Column", padding: { compact: 12, expanded: 24 }, gap: 16, children: [...sourcesBlock(sources), { type: "settings", key: "form", onSaved: "settingsSaved" }] }] }
   };
 }
 function searchView({ query, status, items, history = [], device = "phone" }) {
@@ -394,7 +441,7 @@ function makeMetaCache({ kino: kino2, clock = { now: () => Date.now() } }) {
       return k.backdrop && !withId.backdrop ? { ...withId, backdrop: k.backdrop } : withId;
     });
   }
-  async function fill(cards, budgetMs) {
+  async function fill2(cards, budgetMs) {
     if (!usable()) return 0;
     const b = read();
     const end = clock.now() + budgetMs;
@@ -425,7 +472,7 @@ function makeMetaCache({ kino: kino2, clock = { now: () => Date.now() } }) {
     if (asked2 > 0) write();
     return asked2;
   }
-  return { known, asked, dress, fill, usable };
+  return { known, asked, dress, fill: fill2, usable };
 }
 
 // src/browse/index.js
@@ -445,7 +492,7 @@ function metaAsk(c) {
   return { id: c.id, title, kind: c.kind, ...c.adult === true ? { adult: true } : {}, ...y ? { year: parseInt(y[0].slice(1, 5), 10) } : {} };
 }
 var MAX_LOAD_TRIES = 3;
-function makeBrowse({ kino: kino2, loadTab, searchTitles, live = null, warm = null }) {
+function makeBrowse({ kino: kino2, loadTab, searchTitles, live = null, warm = null, sources = null }) {
   const meta = makeMetaCache({ kino: kino2 });
   const slidesFrom = (rails) => {
     const out = [];
@@ -474,14 +521,14 @@ function makeBrowse({ kino: kino2, loadTab, searchTitles, live = null, warm = nu
     } catch (_) {
     }
   };
-  const get = (k) => {
+  const get3 = (k) => {
     try {
       return kino2.storage.get(k);
     } catch (_) {
       return null;
     }
   };
-  const set = (k, v, opts) => {
+  const set3 = (k, v, opts) => {
     try {
       kino2.storage.set(k, v, opts);
     } catch (_) {
@@ -489,7 +536,7 @@ function makeBrowse({ kino: kino2, loadTab, searchTitles, live = null, warm = nu
   };
   function readSnap(tab) {
     try {
-      const o = JSON.parse(get(SNAP_PREFIX + tab) || "null");
+      const o = JSON.parse(get3(SNAP_PREFIX + tab) || "null");
       return o && Date.now() - o.at < SNAP_TTL_MS && o.data && Array.isArray(o.data.rails) ? o.data : null;
     } catch (_) {
       return null;
@@ -500,7 +547,7 @@ function makeBrowse({ kino: kino2, loadTab, searchTitles, live = null, warm = nu
       const slim2 = { slides: data.slides, rails: data.rails.map((r) => ({ ...r, items: r.items.slice(0, per) })) };
       const text = JSON.stringify({ at: Date.now(), data: slim2 });
       if (text.length <= SNAP_MAX) {
-        set(SNAP_PREFIX + tab, text, { ttlMs: SNAP_TTL_MS });
+        set3(SNAP_PREFIX + tab, text, { ttlMs: SNAP_TTL_MS });
         return;
       }
     }
@@ -508,17 +555,17 @@ function makeBrowse({ kino: kino2, loadTab, searchTitles, live = null, warm = nu
   function homeSeed(tab) {
     if (tab !== "inicio") return null;
     try {
-      const o = JSON.parse(get(HOME_KEY) || "null");
+      const o = JSON.parse(get3(HOME_KEY) || "null");
       return o && Array.isArray(o.rows) && o.rows.length ? tabOf({ rows: o.rows }) : null;
     } catch (_) {
       return null;
     }
   }
   const stored = () => {
-    const t2 = get(TAB_KEY);
+    const t2 = get3(TAB_KEY);
     return TAB_IDS.includes(t2) ? t2 : null;
   };
-  const remember2 = (tab) => set(TAB_KEY, tab);
+  const remember2 = (tab) => set3(TAB_KEY, tab);
   function dataOf(tab) {
     if (memo.has(tab)) return memo.get(tab).data;
     const snap = readSnap(tab) || homeSeed(tab);
@@ -530,7 +577,7 @@ function makeBrowse({ kino: kino2, loadTab, searchTitles, live = null, warm = nu
   }
   const readKeys = () => {
     try {
-      const a = JSON.parse(get(RECENT_KEY) || "[]");
+      const a = JSON.parse(get3(RECENT_KEY) || "[]");
       return Array.isArray(a) ? a.filter((k) => typeof k === "string") : [];
     } catch (_) {
       return [];
@@ -542,14 +589,14 @@ function makeBrowse({ kino: kino2, loadTab, searchTitles, live = null, warm = nu
       if (key === "") return;
       const keys = readKeys();
       if (keys[0] === key) return;
-      set(RECENT_KEY, JSON.stringify([key, ...keys.filter((k) => k !== key)].slice(0, RECENT_MAX)));
+      set3(RECENT_KEY, JSON.stringify([key, ...keys.filter((k) => k !== key)].slice(0, RECENT_MAX)));
     } catch (_) {
     }
   }
   const slim = (c) => ({ id: c.id, ref: c.ref, title: c.title, kind: c.kind, ...c.poster ? { poster: c.poster } : {} });
   function readHistory() {
     try {
-      const a = JSON.parse(get(HIST_KEY) || "[]");
+      const a = JSON.parse(get3(HIST_KEY) || "[]");
       return Array.isArray(a) ? a.filter((c) => c && typeof c.id === "string" && typeof c.ref === "string" && typeof c.title === "string").slice(0, HIST_MAX) : [];
     } catch (_) {
       return [];
@@ -559,7 +606,7 @@ function makeBrowse({ kino: kino2, loadTab, searchTitles, live = null, warm = nu
     try {
       const fresh = cards.filter((c) => c.adult !== true).slice(0, 12).map(slim);
       const ids = new Set(fresh.map((c) => c.id));
-      set(HIST_KEY, JSON.stringify([...fresh, ...readHistory().filter((c) => !ids.has(c.id))].slice(0, HIST_MAX)));
+      set3(HIST_KEY, JSON.stringify([...fresh, ...readHistory().filter((c) => !ids.has(c.id))].slice(0, HIST_MAX)));
     } catch (_) {
     }
   }
@@ -591,7 +638,9 @@ function makeBrowse({ kino: kino2, loadTab, searchTitles, live = null, warm = nu
     try {
       if (!liveTilesList) await loadLiveTiles();
       liveRow = [];
+      const t0 = Date.now();
       for (const tile of (liveTilesList || []).slice(0, 3)) {
+        if (Date.now() - t0 > 6e3) break;
         if (!liveChannels2.has(tile.ref)) await loadCategory(tile.ref);
         const got = liveChannels2.get(tile.ref) || [];
         if (got.length > 0) {
@@ -615,7 +664,7 @@ function makeBrowse({ kino: kino2, loadTab, searchTitles, live = null, warm = nu
   }
   function view(ctx) {
     const st = ctx.state && typeof ctx.state === "object" ? ctx.state : {};
-    if (ctx.route && ctx.route.name === "settings") return settingsView();
+    if (ctx.route && ctx.route.name === "settings") return settingsView({ sources: sources ? sources.list() : [] });
     if (ctx.route && ctx.route.name === "live") {
       const cat = typeof st.lcat === "string" ? st.lcat : liveTilesList && liveTilesList[0] ? liveTilesList[0].ref : null;
       const lq = typeof st.lq === "string" ? st.lq : "";
@@ -782,6 +831,16 @@ function makeBrowse({ kino: kino2, loadTab, searchTitles, live = null, warm = nu
     lcat({ value }) {
       return typeof value === "string" && value !== "" ? { state: { lcat: value } } : null;
     },
+    // The settings form saved (the catalog mode may have changed): draw the switches again.
+    settingsSaved({ state }) {
+      return { state: { srcRev: (Number(state.srcRev) || 0) + 1 } };
+    },
+    // A switch of the sources page: picking one freezes what the others are now, and moves the mode to "custom".
+    toggleSource({ arg, value, state }) {
+      if (!sources || typeof arg !== "string") return null;
+      if (!sources.toggle(arg, value !== false)) return { toast: both("brSrcNotSaved"), state: { srcRev: (Number(state.srcRev) || 0) + 1 } };
+      return { config: { srcMode: "custom" }, state: { srcRev: (Number(state.srcRev) || 0) + 1 } };
+    },
     // The gear: the plugin's settings are a page of their own, one Back away.
     go({ arg }) {
       if (arg === "live") return { route: { push: "live" }, state: { lcat: null } };
@@ -797,6 +856,386 @@ function makeBrowse({ kino: kino2, loadTab, searchTitles, live = null, warm = nu
     return handler ? await handler({ ...ev, state: ev.state || {} }) ?? null : null;
   }
   return { view, event, notePlayed };
+}
+
+// src/robust/budget.js
+function makeBudget(ms) {
+  const end = Date.now() + ms;
+  return {
+    end,
+    /** Ms left (negative once over). */
+    left: () => end - Date.now(),
+    /** A request's timeout: at most [max], at most what is left less [reserve], never under [min]. */
+    cap: (max, reserve = 0, min = 0) => Math.max(min, Math.min(max, end - Date.now() - reserve)),
+    /** True when a request of at least [needed] ms no longer fits. */
+    short: (needed) => end - Date.now() < needed
+  };
+}
+async function withTime(ms, work) {
+  if (ms < 1e3) return null;
+  let timedOut = false;
+  const stop = kino.sleep(ms).then(() => {
+    timedOut = true;
+    return null;
+  });
+  const out = await Promise.race([Promise.resolve(work).catch(() => null), stop]);
+  return timedOut ? null : out;
+}
+
+// src/robust/store.js
+var DAY_MS = 24 * 60 * 60 * 1e3;
+var get = (k) => {
+  try {
+    return kino.storage.get(k);
+  } catch {
+    return null;
+  }
+};
+var set = (k, v, opts) => {
+  try {
+    kino.storage.set(k, v, opts);
+  } catch {
+  }
+};
+var readObject = (k) => {
+  try {
+    const o = JSON.parse(get(k) || "{}");
+    return o && typeof o === "object" && !Array.isArray(o) ? o : {};
+  } catch {
+    return {};
+  }
+};
+var HEALTH_KEY = "rb_health";
+var DOWN_AFTER = 3;
+var readHealth = () => readObject(HEALTH_KEY);
+function recordHealth(ok) {
+  const prev = readHealth();
+  const fails = ok ? 0 : (Number.isFinite(prev.fails) ? prev.fails : 0) + 1;
+  set(HEALTH_KEY, JSON.stringify({ ok, fails, at: Date.now() }));
+  try {
+    if (fails === DOWN_AFTER) kino.log.report("cncverse:down", "server");
+  } catch {
+  }
+}
+var BREAKER_KEY = "rb_breaker";
+var BREAKER_AFTER = 2;
+var STEPS_MIN = [10, 30, 120, 360];
+function readBreaker() {
+  const out = {};
+  for (const [k, v] of Object.entries(readObject(BREAKER_KEY))) if (v && Number.isFinite(v.n) && Number.isFinite(v.until)) out[k] = { n: v.n, until: v.until };
+  return out;
+}
+function noteCatalog(id, ok, scope = "play") {
+  if (!id) return;
+  const key = scope + ":" + id;
+  const all = readBreaker();
+  if (ok) delete all[key];
+  else {
+    const n = (all[key] && all[key].n || 0) + 1;
+    const step = STEPS_MIN[Math.min(Math.max(0, n - BREAKER_AFTER), STEPS_MIN.length - 1)];
+    all[key] = { n, until: n >= BREAKER_AFTER ? Date.now() + step * 6e4 : 0 };
+  }
+  set(BREAKER_KEY, JSON.stringify(all), { ttlMs: DAY_MS });
+}
+function pausedFor(id, all, scope) {
+  const br = all || readBreaker();
+  let left = 0;
+  for (const sc of scope ? [scope] : ["play", "search"]) {
+    const e = br[sc + ":" + id];
+    if (e && e.n >= BREAKER_AFTER && e.until > Date.now()) left = Math.max(left, e.until - Date.now());
+  }
+  return left;
+}
+var isPaused = (id, all, scope) => pausedFor(id, all, scope) > 0;
+function resetBreaker() {
+  try {
+    kino.storage.remove(BREAKER_KEY);
+  } catch {
+  }
+}
+function healthyOnly(list, scope) {
+  const br = readBreaker();
+  const ok = list.filter((c) => !isPaused(c.id, br, scope));
+  return ok.length ? ok : list;
+}
+var LAT_KEY = "rb_latency";
+var LATENCY_UNKNOWN_MS = 5e3;
+var readLatency = () => readObject(LAT_KEY);
+function noteLatency(id, ms) {
+  const all = readLatency();
+  const prev = Number(all[id]);
+  all[id] = Math.round(Number.isFinite(prev) && prev > 0 ? prev * 0.6 + ms * 0.4 : ms);
+  set(LAT_KEY, JSON.stringify(all), { ttlMs: 7 * DAY_MS });
+}
+function byLatency(list) {
+  const lat = readLatency();
+  const ms = (c) => lat[c.id] || LATENCY_UNKNOWN_MS;
+  return list.slice().sort((a, b) => ms(a) - ms(b));
+}
+var PICKS_KEY = "rb_picks";
+function readPicks() {
+  const out = {};
+  for (const [k, v] of Object.entries(readObject(PICKS_KEY))) if (typeof v === "boolean") out[k] = v;
+  return out;
+}
+function writePicks(map) {
+  const text = JSON.stringify(map);
+  set(PICKS_KEY, text);
+  return get(PICKS_KEY) === text;
+}
+var sourceMode = () => String(kino.config.get("srcMode") || "all") === "custom" ? "custom" : "all";
+function isOn(cat) {
+  if (sourceMode() !== "custom") return true;
+  const picks = readPicks();
+  const ids = manifestIds();
+  if (ids.length > 0 && ids.every((id) => picks[id] === false)) return true;
+  return typeof picks[cat.id] === "boolean" ? picks[cat.id] : true;
+}
+var idsMemo = { raw: null, ids: [] };
+function manifestIds() {
+  const raw = get("m2");
+  if (raw !== idsMemo.raw) {
+    let ids = [];
+    try {
+      const o = JSON.parse(raw || "null");
+      ids = o && o.v && Array.isArray(o.v.catalogs) ? o.v.catalogs.map((c) => c && c.id).filter((x) => typeof x === "string") : [];
+    } catch {
+      ids = [];
+    }
+    idsMemo = { raw, ids };
+  }
+  return idsMemo.ids;
+}
+
+// src/robust/index.js
+var BATCH = 500;
+var KEEP_MAX = 4e4;
+var DATA_MAX = 3600;
+var PRUNE_STEP = 500;
+var available = () => typeof kino.catalog === "object" && kino.catalog !== null;
+function clip(text, max) {
+  let s = String(text).slice(0, max);
+  if (/[\uD800-\uDBFF]$/.test(s)) s = s.slice(0, -1);
+  return s;
+}
+function bytes(s) {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 128) n += 1;
+    else if (c < 2048) n += 2;
+    else if (c >= 55296 && c <= 56319) {
+      n += 4;
+      i++;
+    } else n += 3;
+  }
+  return n;
+}
+function rowOf(item, catId, now, before) {
+  if (!item || !item.id || !item.ref || !item.title || item.kind === "live" || item.adult === true) return null;
+  const cats = [catId, ...catsOf(before).filter((c) => c !== catId)].slice(0, 4);
+  const data = { r: item.ref, k: item.kind === "series" ? "s" : "m", c: cats };
+  if (item.poster) data.p = item.poster;
+  if (item.year) data.y = item.year;
+  if (bytes(JSON.stringify(data)) > DATA_MAX) return null;
+  return { id: String(item.id).slice(0, 128), title: clip(item.title, 300), sort: now, data };
+}
+function catsOf(row) {
+  const c = row && row.data && row.data.c;
+  return Array.isArray(c) ? c.filter((x) => typeof x === "string") : typeof c === "string" ? [c] : [];
+}
+async function indexItems(items, catId) {
+  if (!available() || !items.length) return;
+  const now = Date.now();
+  const write = async () => {
+    for (let i = 0; i < items.length; i += BATCH) {
+      const slice = items.slice(i, i + BATCH);
+      const known = /* @__PURE__ */ new Map();
+      for (const row of await kino.catalog.get(slice.map((it) => String(it.id).slice(0, 128)))) known.set(row.id, row);
+      const rows = slice.map((it) => rowOf(it, catId, now, known.get(String(it.id).slice(0, 128)))).filter(Boolean);
+      if (rows.length) await kino.catalog.upsert(rows);
+    }
+  };
+  try {
+    await write();
+    if (Math.random() < 0.1) await prune(0);
+  } catch (e) {
+    if (e && e.code === "limit") {
+      try {
+        await prune(PRUNE_STEP * 2);
+        await write();
+      } catch (e2) {
+        kino.log("index full and not freed: " + (e2 && e2.message));
+      }
+      return;
+    }
+    kino.log("index not written: " + (e && e.message));
+  }
+}
+async function prune(atLeast) {
+  const excess = Math.max(atLeast, await kino.catalog.count() - KEEP_MAX);
+  for (let left = excess; left > 0; left -= 100) {
+    const { items } = await kino.catalog.search({ order: "oldest", limit: Math.min(100, left) });
+    if (!items.length) return;
+    await kino.catalog.remove(items.map((r) => r.id));
+  }
+}
+function itemOf(row) {
+  const d = row.data || {};
+  if (typeof d.r !== "string") return null;
+  const item = { id: row.id, ref: d.r, title: row.title, kind: d.k === "s" ? "series" : "movie" };
+  if (d.p) item.poster = d.p;
+  if (d.y) item.year = d.y;
+  return item;
+}
+async function searchIndex(q, { only, onKeys, limit = 60 } = {}) {
+  if (!available()) return [];
+  try {
+    const out = [];
+    for (let offset = 0; out.length < limit && offset < 400; offset += 100) {
+      const page = await kino.catalog.search({ q: String(q).slice(0, 256), limit: 100, offset, order: "newest" });
+      for (const row of page.items) {
+        const cats = catsOf(row);
+        const cat = only ? cats.find((c) => c === only) : onKeys ? cats.find((c) => onKeys.has(c)) : cats[0];
+        if (!cat) continue;
+        const it = itemOf(row);
+        if (it) out.push({ item: it, cat, cats });
+        if (out.length >= limit) break;
+      }
+      if (offset + page.items.length >= page.total) break;
+    }
+    return out;
+  } catch (e) {
+    kino.log("index not read: " + (e && e.message));
+    return [];
+  }
+}
+async function indexGet(id) {
+  if (!available()) return null;
+  try {
+    const [row] = await kino.catalog.get([String(id).slice(0, 128)]);
+    if (!row) return null;
+    const d = row.data || {};
+    return { title: row.title, cat: catsOf(row)[0] || "", kind: d.k === "s" ? "series" : "movie", year: Number(d.y) || 0 };
+  } catch {
+    return null;
+  }
+}
+async function indexRemove(id) {
+  if (!available()) return;
+  try {
+    await kino.catalog.remove([String(id).slice(0, 128)]);
+  } catch {
+  }
+}
+async function indexSize() {
+  if (!available()) return 0;
+  try {
+    return await kino.catalog.count();
+  } catch {
+    return 0;
+  }
+}
+async function clearIndex() {
+  if (available()) await kino.catalog.clear();
+}
+
+// src/robust/rank.js
+var get2 = (k) => {
+  try {
+    return kino.storage.get(k);
+  } catch {
+    return null;
+  }
+};
+var set2 = (k, v, ttlMs) => {
+  try {
+    kino.storage.set(k, v, { ttlMs });
+  } catch {
+  }
+};
+function hostOf(url) {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+var lineOf = (title, emoji) => {
+  const l = String(title || "").split("\n").find((x) => x.startsWith(emoji));
+  return l ? l.slice(emoji.length).trim() : "";
+};
+function describe(s) {
+  const text = String(s.name || "") + " " + String(s.title || "");
+  const q = /(2160|1440|1080|720|480|360)p/i.exec(text) || (/\b4k\b/i.test(text) ? [null, "2160"] : null);
+  const size = /(\d+(?:\.\d+)?)\s*(GB|MB)\b/i.exec(lineOf(s.title, "\u{1F4BE}") || String(s.title || ""));
+  return { quality: q ? parseInt(q[1], 10) : 0, gb: size ? parseFloat(size[1]) / (size[2].toUpperCase() === "MB" ? 1024 : 1) : 0 };
+}
+function qualityRank(q, pref) {
+  if (pref === "max") return -q;
+  const cap = pref === "720" ? 720 : 1080;
+  const v = q || cap;
+  return v <= cap ? cap - v : 1e5 + (v - cap);
+}
+function tierOf(url, prefer) {
+  if (/^http:\/\//i.test(url)) return 3;
+  const hlsFirst = prefer === "hls";
+  if (/\.m3u8(\?|$)/i.test(url)) return hlsFirst ? 0 : 1;
+  if (/\.(mkv|mp4|webm)(\?|$)/i.test(url)) return hlsFirst ? 1 : 0;
+  return 2;
+}
+function fileKey(url) {
+  const path = String(url).split("?")[0];
+  return hostOf(url) + ":" + path.slice(path.lastIndexOf("/") + 1).slice(0, 40);
+}
+var SERVED_PREFIX = "rb_served:";
+var BAD_KEY = "rb_bad";
+var REOPEN_WINDOW_MS = 2 * 60 * 1e3;
+var BAD_FOR_MS = 10 * 60 * 1e3;
+var BAD_MAX = 40;
+function readBad() {
+  try {
+    const raw = JSON.parse(get2(BAD_KEY) || "{}");
+    const now = Date.now();
+    const out = {};
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      for (const [k, until] of Object.entries(raw)) if (Number(until) > now) out[k] = Number(until);
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+function writeBad(bad) {
+  const entries = Object.entries(bad).sort((a, b) => b[1] - a[1]).slice(0, BAD_MAX);
+  set2(BAD_KEY, JSON.stringify(Object.fromEntries(entries)), BAD_FOR_MS);
+}
+function rank(usable, ref, options, hash2) {
+  const pref = String(kino.config.get("quality") || "1080");
+  const prefer = String(kino.config.get("prefer") || "file");
+  const capGb = parseFloat(String(kino.config.get("maxSize") || "10")) || 0;
+  const bad = readBad();
+  const servedKey = SERVED_PREFIX + hash2(ref);
+  let prev = null;
+  try {
+    prev = JSON.parse(get2(servedKey) || "null");
+  } catch {
+    prev = null;
+  }
+  const now = Date.now();
+  const reopened = options && options.retry || prev && typeof prev.t === "number" && now - prev.t < REOPEN_WINDOW_MS;
+  if (reopened && prev && prev.key) {
+    bad[prev.key] = now + BAD_FOR_MS;
+    writeBad(bad);
+  }
+  const scope = hash2(ref);
+  const rows = usable.map((s, index) => ({ s, index, key: scope + "|" + fileKey(s.url), ...describe(s), tier: tierOf(s.url, prefer) }));
+  const heavy = (x) => capGb > 0 && x.gb > capGb ? 1 : 0;
+  rows.sort(
+    (a, b) => (bad[a.key] ? 1 : 0) - (bad[b.key] ? 1 : 0) || heavy(a) - heavy(b) || qualityRank(a.quality, pref) - qualityRank(b.quality, pref) || a.tier - b.tier || (a.gb || 99) - (b.gb || 99) || a.index - b.index
+  );
+  if (rows.length) set2(servedKey, JSON.stringify({ t: now, key: rows[0].key }), BAD_FOR_MS);
+  return rows.map((r) => r.s);
 }
 
 // src/plugin.js
@@ -820,7 +1259,15 @@ var TEXTS = {
     unchecked: "Sin comprobar",
     offline: "Sin conexi\xF3n: {detail}",
     online: "Conectado: {catalogs} cat\xE1logos",
-    movieEpisode: "Pel\xEDcula"
+    movieEpisode: "Pel\xEDcula",
+    warming: "El servidor est\xE1 preparando esta lista. Vuelve a abrirla en un momento.",
+    warmingVideo: "El servidor est\xE1 buscando el video (puede tardar la primera vez). Vuelve a intentarlo en un momento.",
+    revoked: "El servidor ya no atiende esta direcci\xF3n.",
+    indexStatus: "{n} t\xEDtulos",
+    sourcesStatus: "{on} activos de {all}, {paused} en pausa",
+    resumed: "Listo: los cat\xE1logos en pausa vuelven a intentarse",
+    indexCleared: "Listo: se vaci\xF3 el \xEDndice de b\xFAsqueda",
+    cacheCleared: "Listo: se vaci\xF3 la cach\xE9"
   },
   en: {
     timeout: "The server isn't responding. Try again in a moment.",
@@ -840,7 +1287,15 @@ var TEXTS = {
     unchecked: "Not checked",
     offline: "Offline: {detail}",
     online: "Connected: {catalogs} catalogs",
-    movieEpisode: "Movie"
+    movieEpisode: "Movie",
+    warming: "The server is preparing this list. Open it again in a moment.",
+    warmingVideo: "The server is looking for the video (it can take a while the first time). Try again in a moment.",
+    revoked: "The server no longer serves this address.",
+    indexStatus: "{n} titles",
+    sourcesStatus: "{on} on of {all}, {paused} paused",
+    resumed: "Done: paused catalogs will be tried again",
+    indexCleared: "Done: the search index is empty",
+    cacheCleared: "Done: the cache is empty"
   }
 };
 function t(key, vars) {
@@ -854,7 +1309,15 @@ function enc(s) {
 function route(path) {
   return path.split("/").slice(0, 3).join("/");
 }
-async function getJson(path, timeoutMs) {
+var INFLIGHT = /* @__PURE__ */ new Map();
+function getJson(path, timeoutMs) {
+  const shared = INFLIGHT.get(path);
+  if (shared) return shared;
+  const p = fetchJson(path, timeoutMs).finally(() => INFLIGHT.delete(path));
+  INFLIGHT.set(path, p);
+  return p;
+}
+async function fetchJson(path, timeoutMs) {
   let r;
   try {
     r = await kino.fetch(BASE + path, { timeoutMs: timeoutMs || 12e3 });
@@ -918,22 +1381,31 @@ function normalizeManifest(m) {
   }
   return { resources, catalogs };
 }
-async function loadManifest(fresh) {
-  let stale = null;
+function staleManifest() {
   try {
     const raw = kino.storage.get(MANIFEST_KEY);
-    if (raw) stale = JSON.parse(raw);
+    return raw ? JSON.parse(raw) : null;
   } catch {
+    return null;
   }
+}
+function manifestNow() {
+  const s = staleManifest();
+  return s && s.v && Array.isArray(s.v.catalogs) ? s.v : null;
+}
+async function loadManifest(fresh, capMs) {
+  const stale = staleManifest();
   if (!fresh && stale && Date.now() - stale.at < TTL_MANIFEST) return stale.v;
   try {
-    const v = normalizeManifest(await getJson("/manifest.json", 15e3));
+    const v = normalizeManifest(await getJson("/manifest.json", capMs || (stale && !fresh ? 6e3 : 12e3)));
     try {
       kino.storage.set(MANIFEST_KEY, JSON.stringify({ at: Date.now(), v }));
     } catch {
     }
+    recordHealth(true);
     return v;
   } catch (e) {
+    recordHealth(false);
     if (stale && !fresh) return stale.v;
     throw e;
   }
@@ -972,6 +1444,7 @@ function remember(key, name, isSeries, year2) {
   KINDS_DIRTY = true;
 }
 function flushKinds() {
+  flushCats();
   if (!KINDS_DIRTY) return;
   const k = kinds();
   const keys = Object.keys(k);
@@ -981,6 +1454,50 @@ function flushKinds() {
   } catch {
   }
   KINDS_DIRTY = false;
+}
+var CATS_KEY = "rb_cats";
+var MAX_CATS = 600;
+var CATS = null;
+var CATS_DIRTY = false;
+function catsMemo() {
+  if (!CATS) {
+    try {
+      CATS = JSON.parse(kino.storage.get(CATS_KEY) || "null");
+    } catch {
+      CATS = null;
+    }
+    if (!CATS || !Array.isArray(CATS.c) || typeof CATS.m !== "object" || !CATS.m) CATS = { c: [], m: {} };
+  }
+  return CATS;
+}
+function noteCatOf(cardKey, catId) {
+  const memo = catsMemo();
+  let i = memo.c.indexOf(catId);
+  if (i < 0) {
+    if (memo.c.length >= 200) return;
+    i = memo.c.push(catId) - 1;
+  }
+  const k = cardKey.slice(0, 9);
+  if (memo.m[k] === i) return;
+  delete memo.m[k];
+  memo.m[k] = i;
+  CATS_DIRTY = true;
+}
+function catOfKey(cardKey) {
+  const memo = catsMemo();
+  const i = memo.m[cardKey.slice(0, 9)];
+  return Number.isInteger(i) && memo.c[i] ? memo.c[i] : "";
+}
+function flushCats() {
+  if (!CATS_DIRTY) return;
+  const memo = catsMemo();
+  const keys = Object.keys(memo.m);
+  for (let i = 0; i < keys.length - MAX_CATS; i++) delete memo.m[keys[i]];
+  try {
+    kino.storage.set(CATS_KEY, JSON.stringify(memo), { ttlMs: TTL_KINDS });
+  } catch {
+  }
+  CATS_DIRTY = false;
 }
 function hash(s) {
   let a = 2166136261;
@@ -1049,6 +1566,7 @@ function seriesInfo(meta) {
 }
 var PAGE = 100;
 var DEADLINE_MS = 9e3;
+var HOME_BUDGET_MS = 15500;
 var ENRICH_BUDGET = 24;
 function catalogPath(cat, extras) {
   const e = extras ? "/" + extras : "";
@@ -1140,7 +1658,8 @@ function card(m, cat) {
   const key = "n" + hash(m.id);
   const known = kinds()[key];
   const name = !BLANK.test(String(m.name || "")) ? String(m.name) : known ? known[0] : "";
-  return { m, type, key, name, series: known ? known[1] === 1 : void 0, overview: void 0, genres: void 0 };
+  noteCatOf(key, cat.id);
+  return { m, type, key, name, series: known ? known[1] === 1 : void 0, overview: void 0, genres: void 0, cat: cat.id };
 }
 function needsMeta(c) {
   if (!c.name) return 2;
@@ -1150,8 +1669,9 @@ function needsMeta(c) {
 async function enrich(cards, budget, deadline) {
   const todo = cards.filter(needsMeta).sort((a, b) => needsMeta(b) - needsMeta(a)).slice(0, budget);
   await pool(todo, 5, async (c) => {
-    if (Date.now() > deadline) return;
-    const meta = (await getJson(`/meta/${enc(c.type)}/${enc(c.m.id)}.json`, 8e3)).meta;
+    const room = deadline - Date.now();
+    if (room < 1500) return;
+    const meta = (await getJson(`/meta/${enc(c.type)}/${enc(c.m.id)}.json`, Math.min(8e3, room))).meta;
     if (!meta) return;
     const isSeries = Array.isArray(meta.videos) && meta.videos.length > 0;
     if (!c.name && !BLANK.test(String(meta.name || ""))) c.name = String(meta.name);
@@ -1197,10 +1717,14 @@ async function itemsOf(metas, cat, budget, deadline, adult) {
     seen.add(item.id);
     items.push(item);
   }
+  await indexItems(items, cat.id);
   return items;
 }
 function browseCatalogs(manifest) {
-  return manifest.catalogs.filter((c) => c.browsable && !isLiveType(c.type));
+  return manifest.catalogs.filter((c) => c.browsable && !isLiveType(c.type) && isOn(c));
+}
+function shownCatalogs(manifest) {
+  return healthyOnly(browseCatalogs(manifest), "play");
 }
 function rowsSetting() {
   const n = num(kino.config.get("homeRows"));
@@ -1221,6 +1745,7 @@ async function buildRows(specs, deadline) {
       item.adult = true;
     });
     if (!items.length) continue;
+    await indexItems(items, cat.id);
     rows.push({
       id: "r" + safeId(cat.id).slice(0, 80) + (genre ? "-" + hash(genre).slice(0, 8) : ""),
       title: (genre || catalogTitle(cat)).slice(0, 100),
@@ -1231,17 +1756,19 @@ async function buildRows(specs, deadline) {
   flushKinds();
   return rows;
 }
-async function homeRows(manifest) {
-  const cats = browseCatalogs(manifest).slice(0, rowsSetting());
-  const deadline = Date.now() + DEADLINE_MS;
-  const pages = await pool(cats, 5, async (cat) => (await catalogMetas(cat, "", 1e4)).slice(0, 12));
-  return buildRows(cats.map((cat, i) => ({ cat, genre: null, metas: pages[i] })), deadline);
+async function homeRows(manifest, budget) {
+  const cats = shownCatalogs(manifest).slice(0, rowsSetting());
+  const b = budget || makeBudget(HOME_BUDGET_MS);
+  const pages = await pool(cats, 5, async (cat) => b.short(2500) ? [] : (await catalogMetas(cat, "", b.cap(1e4, 200))).slice(0, 12));
+  return buildRows(cats.map((cat, i) => ({ cat, genre: null, metas: pages[i] })), Math.min(b.end, Date.now() + DEADLINE_MS));
 }
-async function homeLiveRows(manifest) {
-  const cats = (await playableLiveCatalogs(manifest)).slice(0, 2);
+async function homeLiveRows(manifest, budget) {
+  const b = budget || makeBudget(HOME_BUDGET_MS);
+  const cats = (await playableLiveCatalogs(manifest, b)).slice(0, 2);
   const rows = await pool(cats, 2, async (cat) => {
+    if (b.short(2500)) return null;
     const taken = /* @__PURE__ */ new Set();
-    const items = (await catalogMetas(cat, "", 15e3)).slice(0, 12).map((m) => channelOf(m, cat, safeId(cat.id), taken)).filter(Boolean).map((ch) => {
+    const items = (await catalogMetas(cat, "", b.cap(15e3, 200))).slice(0, 12).map((m) => channelOf(m, cat, safeId(cat.id), taken)).filter(Boolean).map((ch) => {
       const item = { id: ch.id, ref: ch.ref, title: ch.title, kind: "live" };
       if (ch.logo) item.poster = ch.logo;
       return item;
@@ -1269,7 +1796,11 @@ function saveHome(rows) {
 function savedHome() {
   try {
     const o = JSON.parse(kino.storage.get(HOME_KEY2) || "null");
-    return o && Array.isArray(o.rows) && o.rows.length ? o.rows : null;
+    const rows = o && Array.isArray(o.rows) ? o.rows : [];
+    const m = manifestNow();
+    const on = m ? m.catalogs.filter(isOn).map((c) => "r" + safeId(c.id).slice(0, 80)) : null;
+    const kept = on ? rows.filter((r) => typeof r.id === "string" && on.some((p) => r.id.startsWith(p))) : rows;
+    return kept.length ? kept : null;
   } catch {
     return null;
   }
@@ -1278,9 +1809,10 @@ async function home() {
   let rows = [];
   let live = [];
   let failure = null;
+  const budget = makeBudget(HOME_BUDGET_MS);
   try {
-    const manifest = await loadManifest(false);
-    [live, rows] = await Promise.all([homeLiveRows(manifest).catch(() => []), homeRows(manifest)]);
+    const manifest = await loadManifest(false, 9e3);
+    [live, rows] = await Promise.all([homeLiveRows(manifest, budget).catch(() => []), homeRows(manifest, budget)]);
   } catch (e) {
     failure = e;
   }
@@ -1297,28 +1829,28 @@ var SECTION_TABS = 8;
 var SECTION_ROWS = 12;
 function sectionCatalogs(manifest) {
   const page = Math.max(1, num(kino.config.get("sectionPage")) || 1);
-  return browseCatalogs(manifest).slice((page - 1) * SECTION_TABS, page * SECTION_TABS);
+  return shownCatalogs(manifest).slice((page - 1) * SECTION_TABS, page * SECTION_TABS);
 }
 async function section(arg) {
-  const manifest = await loadManifest(false);
+  const b = makeBudget(HOME_BUDGET_MS);
+  const manifest = await loadManifest(false, 9e3);
   const cats = sectionCatalogs(manifest);
   if (!cats.length) return { rows: [] };
   const tabs = cats.map((c) => ({ id: safeId(c.id).slice(0, 100), label: catalogTitle(c).slice(0, 24) }));
   const index = Math.max(0, tabs.findIndex((x) => x.id === (arg && arg.tab)));
   const cat = cats[index];
   const genres = [null].concat(cat.genres.slice(0, SECTION_ROWS - 1));
-  const deadline = Date.now() + DEADLINE_MS;
-  const pages = await pool(genres, 5, async (genre) => (await catalogMetas(cat, extrasOf({ genre }), 1e4)).slice(0, 12));
-  const rows = await buildRows(genres.map((genre, i) => ({ cat, genre, metas: pages[i] })), deadline);
+  const pages = await pool(genres, 5, async (genre) => b.short(2500) ? [] : (await catalogMetas(cat, extrasOf({ genre }), b.cap(1e4, 200))).slice(0, 12));
+  const rows = await buildRows(genres.map((genre, i) => ({ cat, genre, metas: pages[i] })), Math.min(b.end, Date.now() + DEADLINE_MS));
   return { tabs, tab: tabs[index].id, rows };
 }
 async function tabPage(tab) {
-  const manifest = await loadManifest(false);
-  if (tab !== "catalogos") return { rows: await homeRows(manifest) };
-  const cats = browseCatalogs(manifest).slice(rowsSetting(), rowsSetting() + SECTION_ROWS);
-  const deadline = Date.now() + DEADLINE_MS;
-  const pages = await pool(cats, 5, async (cat) => (await catalogMetas(cat, "", 1e4)).slice(0, 12));
-  return { rows: await buildRows(cats.map((cat, i) => ({ cat, genre: null, metas: pages[i] })), deadline) };
+  const b = makeBudget(HOME_BUDGET_MS);
+  const manifest = await loadManifest(false, 9e3);
+  if (tab !== "catalogos") return { rows: await homeRows(manifest, b) };
+  const cats = shownCatalogs(manifest).slice(rowsSetting(), rowsSetting() + SECTION_ROWS);
+  const pages = await pool(cats, 5, async (cat) => b.short(2500) ? [] : (await catalogMetas(cat, "", b.cap(1e4, 200))).slice(0, 12));
+  return { rows: await buildRows(cats.map((cat, i) => ({ cat, genre: null, metas: pages[i] })), Math.min(b.end, Date.now() + DEADLINE_MS)) };
 }
 var browseInstance = null;
 var browseScreen = () => browseInstance ?? (browseInstance = makeBrowse({
@@ -1328,6 +1860,7 @@ var browseScreen = () => browseInstance ?? (browseInstance = makeBrowse({
     const out = await search({ q });
     return Array.isArray(out) ? out : out && out.items ? out.items : [];
   },
+  sources: { list: () => sourcesList(), toggle: (id, on) => toggleSource(id, on) },
   live: {
     categories: () => liveCategories(),
     channels: (categoryId) => liveChannels({ categoryId }),
@@ -1368,8 +1901,9 @@ async function categoryArt(cats) {
   if (cached && Date.now() - cached.at < TTL_ART) return cached.v;
   const deadline = Date.now() + DEADLINE_MS;
   const posters = await pool(cats, 5, async (cat) => {
-    if (Date.now() > deadline) return void 0;
-    const metas = await catalogMetas(cat, "", 8e3);
+    const room = deadline - Date.now();
+    if (room < 2e3) return void 0;
+    const metas = await catalogMetas(cat, "", Math.min(8e3, room));
     const first = metas.find((m) => httpUrl(m.poster));
     return first ? httpUrl(first.poster) : void 0;
   });
@@ -1386,7 +1920,7 @@ async function categoryArt(cats) {
   return v;
 }
 async function categories() {
-  const manifest = await loadManifest(false);
+  const manifest = await loadManifest(false, 6e3);
   const cats = browseCatalogs(manifest).slice(0, 24);
   const art = await categoryArt(cats);
   return cats.map((cat) => {
@@ -1402,27 +1936,97 @@ async function categories() {
 var SLICE = 24;
 async function browse(ref, cursor) {
   const r = parseRef(ref);
-  const manifest = await loadManifest(false);
+  const b = makeBudget(17500);
+  const manifest = await loadManifest(false, 6e3);
   const cat = manifest.catalogs.find((c) => c.id === r.c && c.type === r.t);
   if (!cat) throw kino.error("not_found", "no catalog", { userMessage: t("unknownRef") });
   const [skipText, offsetText] = String(cursor || "0,0").split(",");
   const skip = num(skipText);
   const offset = num(offsetText);
   const genre = typeof r.g === "string" && cat.genres.includes(r.g) ? r.g : null;
-  const metas = await catalogMetas(cat, extrasOf({ genre, skip }), 15e3);
+  const metas = await catalogMetas(cat, extrasOf({ genre, skip }), b.cap(13e3, 3500, 3e3));
   const slice = metas.slice(offset, offset + SLICE);
-  const items = await itemsOf(slice, cat, ENRICH_BUDGET, Date.now() + DEADLINE_MS, adultName(cat.name) || adultName(genre));
+  const items = await itemsOf(slice, cat, ENRICH_BUDGET, b.end - 1e3, adultName(cat.name) || adultName(genre));
   let next;
   if (offset + SLICE < metas.length) next = `${skip},${offset + SLICE}`;
   else if (metas.length >= PAGE && skip + metas.length < 1e4) next = `${skip + metas.length},0`;
   return next ? { items, next } : { items };
 }
-var MAX_SEARCH_CATALOGS = 18;
+var MAX_SEARCH_CATALOGS = 40;
+var SEARCH_TOTAL_MS = 13500;
+var SEARCH_BUDGET_MS = 11e3;
+var SEARCH_BUDGET_LOCAL_MS = 6e3;
+var CAP_MIN_MS = 3500;
+var CAP_MAX_MS = 9e3;
+var CAP_UNKNOWN_MS = 6e3;
+var SCOPED_ENOUGH = 8;
+var flat = (x) => String(x || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+var FAIR_MS = 3500;
+var SKIPPED = Symbol("skipped");
+async function askCatalog(cat, q, cap, left) {
+  if (left < 1500) return SKIPPED;
+  const t0 = Date.now();
+  try {
+    const metas = (await catalogMetas(cat, extrasOf({ search: q }), Math.min(cap, left))).slice(0, 12);
+    noteLatency(cat.id, Date.now() - t0);
+    kino.log(`search ${safeId(cat.id).slice(0, 24)}: ${metas.length} in ${Date.now() - t0} ms`);
+    return metas.map((m) => card(m, cat));
+  } catch (e) {
+    if (left >= cap && cap >= FAIR_MS) noteLatency(cat.id, Math.round(cap * 1.5));
+    kino.log(`search ${safeId(cat.id).slice(0, 24)} failed after ${Date.now() - t0} ms: ${e && e.code || "error"}`);
+    return null;
+  }
+}
+function capFor(cat) {
+  const ms = readLatency()[cat.id];
+  return Math.round(Math.min(CAP_MAX_MS, Math.max(CAP_MIN_MS, ms ? ms * 1.6 : CAP_UNKNOWN_MS)));
+}
+async function askCatalogs(cats, q, budget, wantExact, targets) {
+  const lists = /* @__PURE__ */ new Map();
+  const failed = [];
+  const fair = /* @__PURE__ */ new Set();
+  let done = false;
+  let asked = 0;
+  const take = async (cat, cap) => {
+    const room = budget.left();
+    const cards = await askCatalog(cat, q, cap, room);
+    if (cards === SKIPPED) return "skipped";
+    asked++;
+    if (cards === null) {
+      if (room >= cap && cap >= FAIR_MS) fair.add(cat.id);
+      return "failed";
+    }
+    lists.set(cat.id, cards);
+    fair.delete(cat.id);
+    noteCatalog(cat.id, true, "search");
+    if (wantExact && cards.some((c) => targets.includes(baseTitle(c.name)))) done = true;
+    return "ok";
+  };
+  for (const cat of cats) {
+    if (done) break;
+    if (await take(cat, capFor(cat)) === "failed") failed.push(cat);
+  }
+  if (lists.size === 0 && !done) {
+    for (const cat of failed.slice(0, 2)) {
+      if (budget.left() < FAIR_MS) break;
+      if (await take(cat, budget.left()) === "ok") {
+        failed.splice(failed.indexOf(cat), 1);
+        fair.delete(cat.id);
+        break;
+      }
+    }
+  }
+  for (const id of fair) noteCatalog(id, false, "search");
+  return { lists, failed: failed.length, asked };
+}
+var rankItems = (items, titles) => typeof kino.rank === "object" && kino.rank && typeof kino.rank.sortBySimilarity === "function" ? kino.rank.sortBySimilarity(items, titles) : items;
 async function search(query) {
-  const q = String(query.q || "").trim();
+  const total = makeBudget(SEARCH_TOTAL_MS);
+  const q = String(query.q || "").trim().slice(0, 200);
   if (q.length < 2) return [];
-  const manifest = await loadManifest(false);
-  let cats = manifest.catalogs.filter((c) => c.search && !isLiveType(c.type));
+  const manifest = await loadManifest(false, 4e3);
+  const all = manifest.catalogs.filter((c) => c.search && !isLiveType(c.type) && isOn(c));
+  let only = null;
   if (query.within) {
     let r;
     try {
@@ -1430,28 +2034,59 @@ async function search(query) {
     } catch {
       return null;
     }
-    cats = cats.filter((c) => c.id === r.c && c.type === r.t);
-    if (!cats.length) return null;
+    only = all.find((c) => c.id === r.c && c.type === r.t) || null;
+    if (!only) return null;
   }
-  cats = cats.slice(0, MAX_SEARCH_CATALOGS);
-  const deadline = Date.now() + DEADLINE_MS;
-  const found = await pool(cats, 5, async (cat) => (await catalogMetas(cat, extrasOf({ search: q }), 1e4)).slice(0, 12).map((m) => card(m, cat)));
+  const titles = [query.q, query.originalTitle].concat(Array.isArray(query.altTitles) ? query.altTitles : []).filter((x) => typeof x === "string" && x.trim());
+  const local = await searchIndex(q, { only: only && only.id, onKeys: only ? null : new Set(all.map((c) => c.id)), limit: 60 });
+  const localItems = local.map((x) => x.item);
+  if (only && local.length >= SCOPED_ENOUGH) return rankItems(localItems, titles);
+  const pool_ = byLatency(only ? [only] : healthyOnly(all, "search")).slice(0, MAX_SEARCH_CATALOGS);
+  const budget = makeBudget(Math.min(local.length >= 8 ? SEARCH_BUDGET_LOCAL_MS : SEARCH_BUDGET_MS, total.left()));
+  const wantExact = (query.year > 0 || query.tmdbId > 0) && !only;
+  const { lists, failed } = await askCatalogs(pool_, q, budget, wantExact, titles.map(baseTitle).filter(Boolean));
+  if (lists.size === 0 && failed > 0 && !local.length) throw kino.error("unavailable", "no catalog answered the search", { userMessage: t("timeout") });
+  const ordered = pool_.map((c) => lists.get(c.id) || []);
+  const merged = [];
+  for (let i = 0, longest = Math.max(0, ...ordered.map((l) => l.length)); i < longest; i++) for (const l of ordered) if (l[i]) merged.push(l[i]);
   const seen = /* @__PURE__ */ new Set();
-  const cards = [];
-  for (const list of found) {
-    for (const c of list || []) {
-      if (seen.has(c.key)) continue;
-      seen.add(c.key);
-      cards.push(c);
-    }
-  }
+  const cards = merged.filter((c) => !seen.has(c.key) && seen.add(c.key));
   const top = cards.slice(0, 60);
-  await enrich(top, ENRICH_BUDGET, deadline);
+  await enrich(top, ENRICH_BUDGET, total.end - 1e3);
   flushKinds();
-  return top.map(toItem).filter(Boolean);
+  const adultCats = new Set(all.filter((c) => adultName(c.name)).map((c) => c.id));
+  const built = top.map((c) => ({ c, item: toItem(c) })).filter((x) => x.item);
+  for (const x of built) if (adultCats.has(x.c.cat)) x.item.adult = true;
+  const byCat = /* @__PURE__ */ new Map();
+  for (const c of merged) {
+    const item = c.name && !adultCats.has(c.cat) ? toItem(c) : null;
+    if (item) byCat.set(c.cat, (byCat.get(c.cat) || []).concat(item));
+  }
+  for (const [id, items] of byCat) await indexItems(items, id);
+  const names = /* @__PURE__ */ new Set();
+  const out = built.map((x) => x.item).concat(localItems).filter((it) => {
+    const k = flat(it.title);
+    if (!k || names.has(k)) return false;
+    names.add(k);
+    return true;
+  });
+  return rankItems(out, titles);
 }
-async function getMeta(type, id) {
-  const data = await getJson(`/meta/${enc(type)}/${enc(id)}.json`, 15e3);
+function warming(userMessage) {
+  const err = kino.error("unavailable", "the server is still preparing it", { userMessage });
+  err.warming = true;
+  return err;
+}
+var TITLE_BUDGET_MS = 19e3;
+var EXTRAS_UNTIL_MS = 12e3;
+async function getMeta(type, id, capMs) {
+  let data;
+  try {
+    data = await getJson(`/meta/${enc(type)}/${enc(id)}.json`, capMs || 15e3);
+  } catch (e) {
+    if (e && e.code === "unavailable" && /timeout/.test(String(e.message))) throw warming(t("warming"));
+    throw e;
+  }
   if (!data || !data.meta) throw kino.error("not_found", "no meta", { userMessage: t("notStremio") });
   return data.meta;
 }
@@ -1476,31 +2111,66 @@ async function externalIds(isSeries, meta) {
     return void 0;
   }
 }
-async function withExternalIds(info, meta, isSeries) {
-  const ext = await externalIds(isSeries, meta);
+async function withExternalIds(info, meta, isSeries, ms) {
+  const ext = await withTime(ms, externalIds(isSeries, meta));
   if (!ext) return info;
   const ids = Object.assign({}, info.ids);
   for (const k of ["tmdb", "imdb", "mal", "anilist", "kitsu"]) if (ids[k] === void 0 && ext[k] !== void 0) ids[k] = ext[k];
   if (Object.keys(ids).length) info.ids = ids;
   return info;
 }
+async function catOfRef(r) {
+  const key = "n" + hash(r.i || "");
+  const seen = await indexGet(key);
+  return seen && seen.cat || catOfKey(key);
+}
 async function details(ref) {
+  const budget = makeBudget(TITLE_BUDGET_MS - 500);
   const r = parseRef(ref);
-  const meta = await getMeta(r.t, r.i);
+  const meta = await getMeta(r.t, r.i, budget.cap(17e3));
   learn(r.t, r.i, meta);
-  return withExternalIds(seriesInfo(meta), meta, false);
+  const info = seriesInfo(meta);
+  return budget.left() > 6e3 ? withExternalIds(info, meta, false, Math.min(4e3, budget.left() - 1500)) : info;
+}
+function numbered(rows) {
+  const top = /* @__PURE__ */ new Map();
+  for (const r of rows) if (r.number > 0) top.set(r.season, Math.max(top.get(r.season) || 0, r.number));
+  for (const r of rows) {
+    if (r.number > 0) continue;
+    r.number = (top.get(r.season) || 0) + 1;
+    top.set(r.season, r.number);
+  }
+  const seen = /* @__PURE__ */ new Set();
+  return rows.sort((a, b) => a.season - b.season || a.number - b.number).filter((r) => {
+    const k = r.season + ":" + r.number;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
 }
 async function episodes(ref) {
+  const budget = makeBudget(TITLE_BUDGET_MS);
   const r = parseRef(ref);
-  const meta = await getMeta(r.t, r.i);
+  const own = await catOfRef(r);
+  let meta;
+  try {
+    meta = await getMeta(r.t, r.i, budget.cap(17e3));
+  } catch (e) {
+    if (e && e.warming) return { series: {}, episodes: [{ season: 1, number: 1, ref: makeRef(r.t, r.i), title: t("movieEpisode") }] };
+    throw e;
+  }
+  noteCatalog(own, true, "play");
   learn(r.t, r.i, meta);
   const videos = (Array.isArray(meta.videos) ? meta.videos : []).filter((v) => v && typeof v.id === "string");
-  const list = [];
-  videos.forEach((v, index) => {
-    const season = num(v.season) || 1;
-    if (season < 1 || season > 999) return;
-    const number = num(v.episode != null ? v.episode : v.number) || index + 1;
-    const ep = { season, number: Math.min(Math.max(number, 1), 99999), ref: makeRef(r.t, v.id) };
+  const rows = [];
+  videos.forEach((v) => {
+    const seasonRaw = num(v.season);
+    if (seasonRaw > 999) return;
+    const raw = num(v.episode != null ? v.episode : v.number);
+    rows.push({ v, season: seasonRaw > 0 ? seasonRaw : 1, number: seasonRaw > 0 && raw > 0 ? Math.min(raw, 99999) : 0 });
+  });
+  const list = numbered(rows).map(({ v, season, number }) => {
+    const ep = { season, number, ref: makeRef(r.t, v.id) };
     const title = v.title || v.name;
     if (title) ep.title = String(title).slice(0, 200);
     const still = httpUrl(v.thumbnail);
@@ -1509,12 +2179,13 @@ async function episodes(ref) {
     if (overview) ep.overview = String(overview);
     const aired = /^\d{4}-\d{2}-\d{2}/.exec(String(v.released || ""));
     if (aired) ep.airDate = aired[0];
-    list.push(ep);
+    return ep;
   });
   if (!list.length) list.push({ season: 1, number: 1, ref: makeRef(r.t, r.i), title: t("movieEpisode") });
-  list.sort((a, b) => a.season - b.season || a.number - b.number);
   rememberEpisodes(ref, list.map((e) => e.ref));
-  return { series: await withExternalIds(seriesInfo(meta), meta, videos.length > 0), episodes: list };
+  let series = seriesInfo(meta);
+  if (TITLE_BUDGET_MS - budget.left() < EXTRAS_UNTIL_MS) series = await withExternalIds(series, meta, videos.length > 0, Math.min(4e3, budget.left() - 1500));
+  return { series, episodes: list };
 }
 var LANGS = {
   eng: "en",
@@ -1625,46 +2296,219 @@ function streamFor(list, live) {
   if (alternatives.length) stream.alternatives = alternatives;
   return stream;
 }
-async function streamsOf(type, id) {
-  const data = await getJson(`/stream/${enc(type)}/${enc(id)}.json`, 25e3);
+var STREAM_CAP_MS = 17e3;
+async function streamsOf(type, id, capMs) {
+  let data;
+  try {
+    data = await getJson(`/stream/${enc(type)}/${enc(id)}.json`, capMs || STREAM_CAP_MS);
+  } catch (e) {
+    if (e && e.code === "unavailable" && /timeout/.test(String(e.message))) throw warming(t("warmingVideo"));
+    throw e;
+  }
   return Array.isArray(data && data.streams) ? data.streams : [];
 }
-async function resolveRef(ref) {
-  const r = parseRef(ref);
-  const live = isLiveType(r.t);
-  let list = r.i ? await streamsOf(r.t, r.i) : [];
-  let stream = streamFor(list, live);
-  if (!stream && live && r.c && r.n) {
-    const cat = (await loadManifest(false)).catalogs.find((c) => c.id === r.c);
-    const fresh = cat ? (await catalogMetas(cat, "", 15e3)).find((m) => plainName(m.name) === r.n) : null;
-    if (fresh) {
-      list = await streamsOf(r.t, fresh.id);
+var RESOLVE_BUDGET_MS = 18500;
+var MIN_CALL_MS = 2500;
+async function streamsWithin(type, id, capMs, retry, budget) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const cap = Math.min(capMs || STREAM_CAP_MS, budget.left() - 500);
+    if (cap < MIN_CALL_MS) return [];
+    const tryStart = Date.now();
+    const list = (await streamsOf(type, id, cap)).filter(playable);
+    if (list.length) return list;
+    if (retry !== false && attempt < 1 && Date.now() - tryStart < 6e3 && budget.left() - 800 > MIN_CALL_MS + 500) await kino.sleep(800);
+    else break;
+  }
+  return [];
+}
+var XSRC_PREFIX = "rb_xsrc:";
+var XSRC_FOR_MS = 6 * 60 * 60 * 1e3;
+function baseTitle(title) {
+  return String(title || "").toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/\s(?:\d{3,4}p\b|web-?dl|web-?rip|blu-?ray|brrip|hdrip|hdtc|hdcam|dual audio|\{).*$/i, " ").replace(/\(.*?\)|\[.*?\]|\{.*?\}/g, " ").replace(/\b(?:season|temporada)\s*\d+.*$/i, " ").replace(/\bs\d{1,2}\b.*$/i, " ").replace(/[^\p{L}\p{N}]+/gu, "");
+}
+function seasonOf(title) {
+  const m = /\bseason\s*(\d+)|\btemporada\s*(\d+)|\bS(\d{1,2})\b/i.exec(String(title || ""));
+  return m ? parseInt(m[1] || m[2] || m[3], 10) : null;
+}
+async function crossCatalog(title, ownCat, manifest, budget, wantType, wantYear) {
+  const want = baseTitle(title);
+  if (want.length < 2) return null;
+  const wantSeason = seasonOf(title);
+  const yearOf = (name) => {
+    const m = /\((19|20)\d{2}\)/.exec(String(name || ""));
+    return m ? parseInt(m[0].slice(1, 5), 10) : 0;
+  };
+  const wantY = wantYear || yearOf(title);
+  const same = (name, y) => {
+    if (baseTitle(name) !== want) return false;
+    if (wantSeason !== null && seasonOf(name) !== null && seasonOf(name) !== wantSeason) return false;
+    const there = y || yearOf(name);
+    return !(wantY && there && wantY !== there);
+  };
+  const br = readBreaker();
+  const others = manifest.catalogs.filter((c) => c.search && !isLiveType(c.type) && c.id !== ownCat && isOn(c) && !isPaused(c.id, br));
+  const titleOf = (id) => catalogTitle(others.find((c) => c.id === id) || { name: id, type: "" });
+  const words = String(title).replace(/\(.*?\)|\[.*?\]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60);
+  const known = (await searchIndex(words, { onKeys: new Set(others.map((c) => c.id)), limit: 40 })).filter((x) => same(x.item.title, x.item.year));
+  const rankOf = new Map(byLatency(others).map((c, i) => [c.id, i]));
+  known.sort((a, b) => (rankOf.has(a.cat) ? rankOf.get(a.cat) : 99) - (rankOf.has(b.cat) ? rankOf.get(b.cat) : 99));
+  for (const x of known.slice(0, 3)) {
+    if (budget.left() < MIN_CALL_MS + 500) return null;
+    let ref;
+    try {
+      ref = parseRef(x.item.ref);
+    } catch {
+      continue;
+    }
+    if (wantType && ref.t !== wantType) continue;
+    try {
+      const list = await streamsWithin(ref.t, ref.i, Math.min(8e3, budget.left() - 500), false, budget);
+      if (list.length) return { list, ref: x.item.ref, label: titleOf(x.cat) };
+    } catch {
+    }
+  }
+  for (const cat of byLatency(others)) {
+    if (budget.left() < 5500) return null;
+    let metas = [];
+    try {
+      metas = await catalogMetas(cat, extrasOf({ search: words }), Math.min(5e3, budget.left() - 3500));
+    } catch {
+      continue;
+    }
+    const hit = metas.find((m) => m && typeof m.id === "string" && same(String(m.name || ""), year(m)) && (!wantType || String(m.type || cat.type) === wantType));
+    if (!hit) continue;
+    if (budget.left() < 3e3) return null;
+    const type = String(hit.type || cat.type);
+    try {
+      const list = await streamsWithin(type, hit.id, Math.min(8e3, budget.left() - 500), false, budget);
+      if (list.length) return { list, ref: makeRef(type, hit.id), label: catalogTitle(cat) };
+    } catch {
+    }
+    getJson(`/stream/${enc(type)}/${enc(hit.id)}.json`, 1e3).catch(() => null);
+    return null;
+  }
+  return null;
+}
+function whyNot(list, live) {
+  const why = list.map((s) => s && typeof s.url === "string" ? blockedBy(s) : null).filter(Boolean);
+  const key = why.includes("soon") && !why.includes("drm") ? "notYet" : why.includes("drm") ? "drmOnly" : live ? "noChannel" : "noStreams";
+  return kino.error("unavailable", "no streams", { userMessage: t(key) });
+}
+async function resolveLive(r, budget) {
+  let list = r.i ? await streamsOf(r.t, r.i, budget.cap(STREAM_CAP_MS, 500, MIN_CALL_MS)) : [];
+  let stream = streamFor(list, true);
+  if (!stream && r.c && r.n && budget.left() > 6e3) {
+    const cat = (await loadManifest(false, 4e3)).catalogs.find((c) => c.id === r.c);
+    const fresh = cat ? (await catalogMetas(cat, "", budget.cap(1e4, 4e3, MIN_CALL_MS))).find((m) => plainName(m.name) === r.n) : null;
+    if (fresh && budget.left() > MIN_CALL_MS + 500) {
+      list = await streamsOf(r.t, fresh.id, budget.cap(STREAM_CAP_MS, 500, MIN_CALL_MS));
       stream = streamFor(list, true);
     }
   }
-  if (!stream) {
-    const why = list.map((s) => s && typeof s.url === "string" ? blockedBy(s) : null).filter(Boolean);
-    const key = why.includes("soon") && !why.includes("drm") ? "notYet" : why.includes("drm") ? "drmOnly" : live ? "noChannel" : "noStreams";
-    throw kino.error("unavailable", "no streams", { userMessage: t(key) });
+  if (!stream) throw whyNot(list, true);
+  return stream;
+}
+async function resolveVideo(r, ref, options, budget) {
+  const key = "n" + hash(r.i);
+  const seen = await indexGet(key);
+  let own = seen && seen.cat || catOfKey(key);
+  let title = seen ? seen.title : "";
+  if (!title) {
+    const seriesRef = seriesOfEpisode(ref);
+    if (seriesRef) {
+      try {
+        const sk = "n" + hash(parseRef(seriesRef).i);
+        const ss = await indexGet(sk);
+        if (!own) own = ss && ss.cat || catOfKey(sk);
+      } catch {
+      }
+    }
+  }
+  const canSwap = title.length > 1;
+  const memKey = XSRC_PREFIX + hash(ref);
+  const manifest = canSwap ? await loadManifest(false, 3e3).catch(() => null) : null;
+  let list = [];
+  let from = "";
+  let failure = null;
+  if (options && options.retry) {
+    try {
+      kino.storage.remove(memKey);
+    } catch {
+    }
+  }
+  if (canSwap) {
+    try {
+      const mem = JSON.parse(kino.storage.get(memKey) || "null");
+      if (mem && typeof mem.t === "string" && typeof mem.i === "string") {
+        list = await streamsWithin(mem.t, mem.i, 8e3, false, budget);
+        if (list.length) from = String(mem.label || "");
+      }
+    } catch {
+      list = [];
+    }
+  }
+  const pausedFirst = !list.length && canSwap && manifest && own && isPaused(own, null, "play");
+  const cross = async () => {
+    if (!manifest) return;
+    const swap = await crossCatalog(title, own, manifest, budget, r.t, seen && seen.year).catch(() => null);
+    if (!swap) return;
+    list = swap.list;
+    from = swap.label;
+    try {
+      const sr = parseRef(swap.ref);
+      kino.storage.set(memKey, JSON.stringify({ t: sr.t, i: sr.i, label: swap.label }), { ttlMs: XSRC_FOR_MS });
+    } catch {
+    }
+  };
+  if (pausedFirst) await cross();
+  if (!list.length && (!pausedFirst || budget.left() > 6e3)) {
+    try {
+      list = await streamsWithin(r.t, r.i, pausedFirst ? budget.left() - 500 : canSwap ? 9e3 : STREAM_CAP_MS, !canSwap, budget);
+    } catch (e) {
+      failure = e;
+    }
+    if (!(failure && failure.warming)) noteCatalog(own, list.length > 0, "play");
+  }
+  if (!list.length && canSwap && !pausedFirst) await cross();
+  if (!list.length) {
+    if (failure) throw failure;
+    await indexRemove(key);
+    throw whyNot([], false);
+  }
+  const ranked = rank(list.filter(playable), ref, options, hash);
+  const stream = streamFor(ranked, false);
+  if (!stream) throw whyNot(list, false);
+  if (from) {
+    const mark = (s) => s.label ? { ...s, label: `${from} \xB7 ${s.label}`.slice(0, 48) } : { ...s, label: from.slice(0, 48) };
+    Object.assign(stream, mark(stream));
+    if (stream.alternatives) stream.alternatives = stream.alternatives.map(mark);
   }
   return stream;
 }
+async function resolveRef(ref, options) {
+  const budget = makeBudget(RESOLVE_BUDGET_MS);
+  const r = parseRef(ref);
+  return isLiveType(r.t) ? resolveLive(r, budget) : resolveVideo(r, ref, options, budget);
+}
 var LIVE_OK_KEY = "p1";
 var TTL_LIVE_OK = 30 * 60 * 1e3;
-async function playableLiveCatalogs(manifest) {
-  const cats = manifest.catalogs.filter((c) => c.browsable && isLiveType(c.type));
+async function playableLiveCatalogs(manifest, budget) {
+  const cats = manifest.catalogs.filter((c) => c.browsable && isLiveType(c.type) && isOn(c));
   let cached = null;
   try {
     cached = JSON.parse(kino.storage.get(LIVE_OK_KEY) || "null");
   } catch {
   }
   if (cached && Date.now() - cached.at < TTL_LIVE_OK) return cats.filter((c) => cached.v[c.id] !== false);
+  const b = budget && budget.left() < 12e3 ? budget : makeBudget(12e3);
   const verdicts = await pool(cats, 5, async (cat) => {
-    const metas = (await catalogMetas(cat, "", 2e4)).slice(0, 2);
+    if (b.short(3e3)) return void 0;
+    const metas = (await catalogMetas(cat, "", b.cap(8e3, 200))).slice(0, 2);
     let asked = false;
     for (const m of metas) {
+      if (b.short(2500)) break;
       try {
-        const list = await streamsOf(cat.type, m.id);
+        const list = await streamsOf(cat.type, m.id, b.cap(8e3, 200));
         asked = true;
         if (list.some(playable)) return true;
       } catch {
@@ -1676,15 +2520,18 @@ async function playableLiveCatalogs(manifest) {
   cats.forEach((cat, i) => {
     if (verdicts[i] !== void 0) v[cat.id] = verdicts[i];
   });
-  try {
-    kino.storage.set(LIVE_OK_KEY, JSON.stringify({ at: Date.now(), v }));
-  } catch {
+  if (Object.keys(v).length) {
+    try {
+      kino.storage.set(LIVE_OK_KEY, JSON.stringify({ at: Date.now(), v }));
+    } catch {
+    }
   }
   return cats.filter((c) => v[c.id] !== false);
 }
 async function liveCategories() {
-  const manifest = await loadManifest(false);
-  return (await playableLiveCatalogs(manifest)).map((c) => ({ id: safeId(c.id), title: catalogTitle(c) }));
+  const budget = makeBudget(18500);
+  const manifest = await loadManifest(false, 6e3);
+  return (await playableLiveCatalogs(manifest, budget)).map((c) => ({ id: safeId(c.id), title: catalogTitle(c) }));
 }
 function plainName(name) {
   return String(name || "").replace(VISUAL, "").replace(/\s+/g, " ").trim();
@@ -1703,14 +2550,15 @@ function channelOf(m, cat, categoryId, taken) {
 }
 var CHANNEL_PAGE = 500;
 async function liveChannels(arg) {
-  const manifest = await loadManifest(false);
+  const budget = makeBudget(18500);
+  const manifest = await loadManifest(false, 5e3);
   const cat = manifest.catalogs.find((c) => isLiveType(c.type) && safeId(c.id) === arg.categoryId);
   if (!cat) return { items: [] };
   const [skipText, offsetText] = String(arg.cursor || "0,0").split(",");
   const skip = num(skipText);
   const offset = num(offsetText);
-  const metas = await catalogMetas(cat, extrasOf({ skip }), 2e4);
-  const first = skip ? await catalogMetas(cat, "", 2e4) : null;
+  const metas = await catalogMetas(cat, extrasOf({ skip }), budget.cap(12e3, 4500, 3e3));
+  const first = skip ? await catalogMetas(cat, "", budget.cap(12e3, 500, 2500)) : null;
   if (first && first.length && metas.length && first[0].id === metas[0].id) return { items: [] };
   const taken = /* @__PURE__ */ new Set();
   const items = metas.slice(offset, offset + CHANNEL_PAGE).map((m) => channelOf(m, cat, arg.categoryId, taken)).filter(Boolean);
@@ -1723,11 +2571,12 @@ var MAX_LIVE_SEARCH_CATALOGS = 12;
 async function liveSearch(arg) {
   const q = String(arg.query || "").trim();
   if (q.length < 2) return { items: [] };
-  const manifest = await loadManifest(false);
-  const cats = (await playableLiveCatalogs(manifest)).filter((c) => c.search).slice(0, MAX_LIVE_SEARCH_CATALOGS);
-  const found = await pool(cats, 5, async (cat) => {
+  const budget = makeBudget(13500);
+  const manifest = await loadManifest(false, 4e3);
+  const cats = (await playableLiveCatalogs(manifest, makeBudget(Math.min(5e3, budget.left() - 6e3)))).filter((c) => c.search).slice(0, MAX_LIVE_SEARCH_CATALOGS);
+  const found = await pool(cats, Math.max(1, cats.length), async (cat) => {
     const taken = /* @__PURE__ */ new Set();
-    return (await catalogMetas(cat, extrasOf({ search: q }), 1e4)).slice(0, 40).map((m) => channelOf(m, cat, safeId(cat.id), taken)).filter(Boolean);
+    return (await catalogMetas(cat, extrasOf({ search: q }), budget.cap(9e3, 500, 2e3))).slice(0, 40).map((m) => channelOf(m, cat, safeId(cat.id), taken)).filter(Boolean);
   });
   const seen = /* @__PURE__ */ new Set();
   const items = [];
@@ -1735,7 +2584,7 @@ async function liveSearch(arg) {
   return { items: items.slice(0, 100) };
 }
 async function subtitles(arg) {
-  const manifest = await loadManifest(false);
+  const manifest = await loadManifest(false, 5e3);
   if (!manifest.resources.includes("subtitles") || !arg.imdbId) return [];
   const series = arg.kind === "series";
   const id = series && arg.season && arg.episode ? `${arg.imdbId}:${arg.season}:${arg.episode}` : arg.imdbId;
@@ -1745,19 +2594,46 @@ async function subtitles(arg) {
 function detailOf(e) {
   return e && (e.userMessage || e.code) || "error";
 }
-async function settingsStatus() {
-  try {
-    const manifest = await loadManifest(false);
-    return { serverStatus: t("online", { catalogs: manifest.catalogs.length }) };
-  } catch (e) {
-    return { serverStatus: t("offline", { detail: detailOf(e) }) };
-  }
+function sourcesList() {
+  const m = manifestNow();
+  if (!m) return [];
+  const br = readBreaker();
+  const lat = readLatency();
+  return m.catalogs.filter((c) => c.id && !adultName(c.name)).slice(0, 60).map((c) => ({
+    id: c.id,
+    key: safeId(c.id).slice(0, 48) + "-" + hash(c.id).slice(0, 8),
+    title: catalogTitle(c),
+    live: isLiveType(c.type),
+    on: isOn(c),
+    pausedMin: Math.ceil(pausedFor(c.id, br) / 6e4),
+    ms: lat[c.id] || 0
+  }));
 }
-async function action(key) {
-  if (key !== "checkConn") return null;
+function toggleSource(id, on) {
+  const m = manifestNow();
+  if (!m || !m.catalogs.some((c) => c.id === id)) return false;
+  const picks = Object.fromEntries(m.catalogs.map((c) => [c.id, isOn(c)]));
+  picks[id] = on !== false;
+  return writePicks({ ...readPicks(), ...picks });
+}
+async function settingsStatus() {
+  const out = {};
+  try {
+    const manifest = await loadManifest(false, 6e3);
+    out.serverStatus = t("online", { catalogs: manifest.catalogs.length });
+    const list = sourcesList();
+    out.sources = t("sourcesStatus", { on: list.filter((x) => x.on).length, all: list.length, paused: list.filter((x) => x.on && x.pausedMin > 0).length });
+  } catch (e) {
+    out.serverStatus = t("offline", { detail: detailOf(e) });
+  }
+  out.index = t("indexStatus", { n: await indexSize() });
+  return out;
+}
+async function checkConnection() {
+  const budget = makeBudget(27e3);
   let manifest;
   try {
-    manifest = await loadManifest(true);
+    manifest = await loadManifest(true, 1e4);
   } catch (e) {
     return { message: t("stepManifest", { detail: detailOf(e) }) };
   }
@@ -1765,7 +2641,7 @@ async function action(key) {
   if (!cat) return { message: t("stepCatalog", { detail: "0" }) };
   let metas;
   try {
-    metas = await catalogMetas(cat, "", 15e3);
+    metas = await catalogMetas(cat, "", budget.cap(1e4, 9e3, 3e3));
     if (!metas.length) throw kino.error("unavailable", "empty");
   } catch (e) {
     return { message: t("stepCatalog", { detail: catalogTitle(cat) + ": " + detailOf(e) }) };
@@ -1773,19 +2649,56 @@ async function action(key) {
   const sample = metas[0];
   const type = String(sample.type || cat.type);
   try {
-    await getMeta(type, sample.id);
+    await getMeta(type, sample.id, budget.cap(15e3, 4e3, 3e3));
   } catch (e) {
     return { message: t("stepMeta", { detail: detailOf(e) }) };
   }
   try {
-    if (!streamFor(await streamsOf(type, sample.id), false)) throw kino.error("unavailable", "no streams");
+    if (!streamFor(await streamsOf(type, sample.id, budget.cap(STREAM_CAP_MS, 0, 3e3)), false)) throw kino.error("unavailable", "no streams");
   } catch (e) {
     return { message: t("stepStream", { detail: detailOf(e) }) };
   }
   return { message: t("ok", { catalogs: manifest.catalogs.length }) };
 }
-async function resolve(ref) {
-  const out = await resolveRef(ref);
+function clearCaches() {
+  let idx = [];
+  try {
+    idx = JSON.parse(kino.storage.get(CM_INDEX) || "[]");
+  } catch {
+    idx = [];
+  }
+  for (const e of Array.isArray(idx) ? idx : []) if (e && typeof e.k === "string") {
+    try {
+      kino.storage.remove(e.k);
+    } catch {
+    }
+  }
+  for (const k of [CM_INDEX, MANIFEST_KEY, ART_KEY, LIVE_OK_KEY, HOME_KEY2]) {
+    try {
+      kino.storage.remove(k);
+    } catch {
+    }
+  }
+  MEM.clear();
+}
+async function action(key) {
+  if (key === "checkConn") return checkConnection();
+  if (key === "resume") {
+    resetBreaker();
+    return { message: t("resumed") };
+  }
+  if (key === "clearIndex") {
+    await clearIndex();
+    return { message: t("indexCleared") };
+  }
+  if (key === "clearCache") {
+    clearCaches();
+    return { message: t("cacheCleared") };
+  }
+  return null;
+}
+async function resolve(ref, options) {
+  const out = await resolveRef(ref, options);
   try {
     if (!isLiveType(parseRef(ref).t)) browseScreen().notePlayed(seriesOfEpisode(ref) || ref);
   } catch {
@@ -1802,11 +2715,14 @@ export {
   liveCategories,
   liveChannels,
   liveSearch,
+  manifestNow,
   resolve,
   screen,
   screenEvent,
   search,
   section,
   settingsStatus,
-  subtitles
+  sourcesList,
+  subtitles,
+  toggleSource
 };

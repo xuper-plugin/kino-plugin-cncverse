@@ -10,6 +10,7 @@
 // The state holds only `tab`, `pending` and `failed` (a few bytes); the trees live here, in memory.
 import { tabOf, recentOf, cardOf, playedKey, TAB_IDS } from "./model.js";
 import { browseView, searchView, settingsView, liveView } from "./view.js";
+import { both } from "./words.js";
 import { makeMetaCache } from "./metaCache.js";
 
 const TAB_KEY = "browseTab";
@@ -35,7 +36,7 @@ const MAX_LOAD_TRIES = 3;
  * `kino`: the host; `loadTab(tab)` → the section page of that tab (`{ rows }`); `searchTitles(q)` → the cards a search finds;
  * `live`: `{ categories(), channels(categoryId), search(q) }` for the live page; `warm(cards)` asks the bridge to prepare those titles.
  */
-export function makeBrowse({ kino, loadTab, searchTitles, live = null, warm = null }) {
+export function makeBrowse({ kino, loadTab, searchTitles, live = null, warm = null, sources = null }) {
   const meta = makeMetaCache({ kino });
   /** [data] with what the meta cache knows: the cards' TMDB ids and the slides' title logos. */
   // The bridge's lists carry posters only: the slides are the first titles Kino's metadata knows a backdrop and a synopsis for.
@@ -150,7 +151,9 @@ export function makeBrowse({ kino, loadTab, searchTitles, live = null, warm = nu
     try {
       if (!liveTilesList) await loadLiveTiles();
       liveRow = [];
+      const t0 = Date.now();
       for (const tile of (liveTilesList || []).slice(0, 3)) {
+        if (Date.now() - t0 > 6000) break; // a tick is cut at 20 s: one slow category is enough for this one
         if (!liveChannels.has(tile.ref)) await loadCategory(tile.ref);
         const got = liveChannels.get(tile.ref) || [];
         if (got.length > 0) { liveRow = got.slice(0, 20); break; }
@@ -173,7 +176,7 @@ export function makeBrowse({ kino, loadTab, searchTitles, live = null, warm = nu
 
   function view(ctx) {
     const st = ctx.state && typeof ctx.state === "object" ? ctx.state : {};
-    if (ctx.route && ctx.route.name === "settings") return settingsView();
+    if (ctx.route && ctx.route.name === "settings") return settingsView({ sources: sources ? sources.list() : [] });
     if (ctx.route && ctx.route.name === "live") {
       const cat = typeof st.lcat === "string" ? st.lcat : liveTilesList && liveTilesList[0] ? liveTilesList[0].ref : null;
       const lq = typeof st.lq === "string" ? st.lq : "";
@@ -316,6 +319,14 @@ export function makeBrowse({ kino, loadTab, searchTitles, live = null, warm = nu
       return { state: { lq: q === "" ? null : q } };
     },
     lcat({ value }) { return typeof value === "string" && value !== "" ? { state: { lcat: value } } : null; },
+    // The settings form saved (the catalog mode may have changed): draw the switches again.
+    settingsSaved({ state }) { return { state: { srcRev: (Number(state.srcRev) || 0) + 1 } }; },
+    // A switch of the sources page: picking one freezes what the others are now, and moves the mode to "custom".
+    toggleSource({ arg, value, state }) {
+      if (!sources || typeof arg !== "string") return null;
+      if (!sources.toggle(arg, value !== false)) return { toast: both("brSrcNotSaved"), state: { srcRev: (Number(state.srcRev) || 0) + 1 } };
+      return { config: { srcMode: "custom" }, state: { srcRev: (Number(state.srcRev) || 0) + 1 } };
+    },
     // The gear: the plugin's settings are a page of their own, one Back away.
     go({ arg }) {
       if (arg === "live") return { route: { push: "live" }, state: { lcat: null } };

@@ -31,6 +31,46 @@ const PRESS_FIELDS = ["onTap", "onLongPress", "onSubmit", "onTrailingTap"];
 /** An image's `data:` url: a base64 png, jpeg, webp or gif (never svg), at most this many characters. */
 const DATA_IMAGE = /^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/;
 const DATA_IMAGE_MAX_CHARS = 200000;
+/** An image's `headers` (PluginScreenOutput.imageHeaders): a Referer must be an https address. */
+const HTTPS_REFERER = /^https:\/\/[^\s/?#]+\S*$/;
+const CONTROL_CHAR = /[\u0000-\u001f\u007f-\u009f]/;
+
+/**
+ * PluginScreenOutput.imageHeaders: an image's `headers` as Kino keeps them. Only the names in the contract, each a text of 1 to
+ * `maxChars` characters with no control character, a Referer an https address; the rest is dropped, logged. A picture held in the
+ * node (`data:`) takes none. Whether the picture's host is one the plugin declared is decided when the picture is drawn.
+ */
+function imageHeaders(o, url, log) {
+  const raw = o[S.imageHeaders.field];
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== "object" || Array.isArray(raw)) { log("screen: image headers is not an object, ignored"); return {}; }
+  if (!url.startsWith("https://")) { log("screen: image headers without an https url, ignored"); return {}; }
+  return parseImageHeaders(raw, log);
+}
+
+/** PluginScreenOutput.nodeImageHeaders: a composite node's `headers` (heroCard, titleRail, titleGrid, titleCard), the same rules for every picture of the node. */
+function nodeImageHeaders(o, log) {
+  const raw = o[S.imageHeaders.field];
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== "object" || Array.isArray(raw)) { log("screen: image headers is not an object, ignored"); return {}; }
+  return parseImageHeaders(raw, log);
+}
+
+function parseImageHeaders(raw, log) {
+  const out = {};
+  for (const key of Object.keys(raw)) {
+    const name = S.imageHeaders.names.find((n) => n.toLowerCase() === key.toLowerCase());
+    if (!name) { log(`screen: image header ${fmt(key)} is not Referer or User-Agent, dropped`); continue; }
+    const v = raw[key];
+    if (typeof v !== "string" || v === "" || v.length > S.imageHeaders.maxChars || CONTROL_CHAR.test(v)) {
+      log(`screen: image header ${name} is not a text of 1 to ${S.imageHeaders.maxChars} characters, dropped`);
+      continue;
+    }
+    if (name === "Referer" && !HTTPS_REFERER.test(v)) { log("screen: image header Referer is not an https address, dropped"); continue; }
+    out[name] = v;
+  }
+  return out;
+}
 /** Every field a screen answer may carry (ScreenLimits.ANSWER_FIELDS); `ui` since Task 7i-2. */
 const ANSWER_KEYS = S.answerFields;
 /** A declared pop-up's `onClose` (Task 7i-2): ScreenLimits.POPUP_ON_CLOSE. */
@@ -226,7 +266,7 @@ const fits = (o) => bytes(o) <= LIMITS.maxStateBytes;
 
 const KOTLIN_SPACE = /[\p{Zs}\p{Zl}\p{Zp}\t\n\u000B\f\r\u001C-\u001F]/u;
 /** Kotlin's String.trim(): Kotlin's whitespace at both ends (U+FEFF is not one; U+001C..U+001F are). */
-function kotlinTrim(s) {
+export function kotlinTrim(s) {
   let a = 0;
   let b = s.length;
   while (a < b && KOTLIN_SPACE.test(s[a])) a++;
@@ -960,13 +1000,14 @@ class Reader {
           else this.log(`screen: image aspect ${fmt(o.aspect)} is not 16:9, 2:3, 1:1, banner or w:h between 0.2 and 5, dropped`);
         }
         const alt = t("alt");
+        const headers = imageHeaders(o, url, (m) => this.log(m));
         return (k) => {
           let fallback = null;
           if (k && hasFallback) {
             this.inFallback++;
             try { fallback = this.node(fallbackJson, depth + 1); } finally { this.inFallback--; }
           }
-          return { url, aspect, alt, fallback };
+          return { url, aspect, alt, fallback, headers };
         };
       }
       case "icon": {
@@ -1114,7 +1155,8 @@ class Reader {
         if (item === undefined) return fail("needs a valid item");
         const size = this.cardSize(o, type);
         // No tap of its own (or an invalid one, logged): the title's page, inside this plugin.
-        return () => ({ item, size, defaultTap: { ui: [], event: null, go: { title: { ref: item.ref, kind: item.kind, id: item.id } } } });
+        const headers = nodeImageHeaders(o, (m) => this.log(m));
+        return () => ({ item, size, headers, defaultTap: { ui: [], event: null, go: { title: { ref: item.ref, kind: item.kind, id: item.id } } } });
       }
       case "titleRail": case "titleGrid": {
         let title = "";
@@ -1131,7 +1173,8 @@ class Reader {
         const paging = this.paging(o, type, flatHere ? LIMITS.maxFlatTitles : LIMITS.maxListItems);
         if (type === "titleGrid") {
           const columns = this.int(o, type, "columns", 1, LIMITS.maxGridColumns, TITLE_GRID_COLUMNS);
-          return () => ({ items, columns, paging });
+          const headers = nodeImageHeaders(o, (m) => this.log(m));
+          return () => ({ items, columns, paging, headers });
         }
         let more = null;
         const r = opt(o, "ref");
@@ -1140,7 +1183,8 @@ class Reader {
           else this.log(`screen: titleRail ref must be 1 to ${LIMITS.maxRefChars} characters, dropped`);
         }
         const size = this.cardSize(o, type);
-        return () => ({ title, items, more, size, paging });
+        const headers = nodeImageHeaders(o, (m) => this.log(m));
+        return () => ({ title, items, more, size, paging, headers });
       }
       case "banner": {
         const text = t("text");
@@ -1182,7 +1226,8 @@ class Reader {
           logo = httpsImage({ url: typeof lg === "string" ? lg : "" }, []) || null;
           if (logo === null) this.log("screen: heroCard logo is not https on a public host, dropped");
         }
-        return (k) => ({ title, text, image, logo, buttons: k ? this.heroButtons(o, depth) : [] });
+        const headers = nodeImageHeaders(o, (m) => this.log(m));
+        return (k) => ({ title, text, image, logo, headers, buttons: k ? this.heroButtons(o, depth) : [] });
       }
       case POPUP: {
         const kind = opt(o, "kind");
